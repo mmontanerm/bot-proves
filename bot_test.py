@@ -5,29 +5,30 @@ import pandas_ta as ta
 import requests
 import time
 import os
-import json  # <--- NOU: Necessari per guardar dades
+import json
 from datetime import datetime
 
 # ---------------------------------------------------------
 # 1. CONFIGURACIÓ
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Persistent Render", layout="wide", page_icon="💾")
+st.set_page_config(page_title="Bot MaxProfit Secure", layout="wide", page_icon="🛡️")
 
+# Recuperem credencials de l'entorn (Render)
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+# Paràmetres de l'estratègia
 TICKERS = ['NVDA', 'TSLA', 'META', 'MSFT', 'BTC-USD', 'ETH-USD']
 TIMEFRAME = "1m"        
 LEVERAGE = 5            
-TARGET_PROFIT = 0.015   # 1.5%
-STOP_LOSS_PCT = 0.003   # 0.3%
+TARGET_PROFIT = 0.015   # 1.5% Guany Objectiu
+STOP_LOSS_PCT = 0.003   # 0.3% Moviment real (x5 = 1.5% Pèrdua)
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_data.json" # Nom del fitxer on guardarem tot
+DATA_FILE = "bot_data.json"
 
 # ---------------------------------------------------------
 # 2. FUNCIONS DE PERSISTÈNCIA (MEMÒRIA)
 # ---------------------------------------------------------
-
 def save_state():
     """Guarda l'estat actual al fitxer JSON."""
     data = {
@@ -57,12 +58,9 @@ def load_state():
 # ---------------------------------------------------------
 # 3. INICIALITZACIÓ D'ESTAT
 # ---------------------------------------------------------
-
-# Intentem carregar dades antigues primer
 saved_data = load_state()
 
 if saved_data:
-    # Si trobem dades guardades, les usem!
     if 'balance' not in st.session_state:
         st.session_state.balance = saved_data.get('balance', INITIAL_CAPITAL)
         st.session_state.wins = saved_data.get('wins', 0)
@@ -71,7 +69,6 @@ if saved_data:
         st.session_state.history = saved_data.get('history', [])
         st.toast(f"💾 Dades recuperades! Últim guardat: {saved_data.get('last_update')}")
 else:
-    # Si no hi ha fitxer, comencem de zero
     if 'balance' not in st.session_state:
         st.session_state.balance = INITIAL_CAPITAL
         st.session_state.wins = 0
@@ -89,45 +86,88 @@ else:
             } for ticker in TICKERS
         }
 
-# Retall d'historial per no omplir el disc
+# Limitar historial per no saturar memòria
 if len(st.session_state.history) > 50:
     st.session_state.history = st.session_state.history[-50:]
 
 # ---------------------------------------------------------
-# 4. FUNCIONS TRADING & UTILS
+# 4. FUNCIONS AUXILIARS
 # ---------------------------------------------------------
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🚀 [BOT PERSISTENT]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🚀 [BOT RENDER]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
 def get_data_optimized(tickers):
+    """
+    Baixa dades de manera robusta i calcula indicadors.
+    """
     try:
-        data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False)
+        # CORRECCIÓ 1: auto_adjust=True per evitar warnings
+        # Afegim threads=False de vegades ajuda en entorns limitats, però ho deixem per defecte
+        data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False, auto_adjust=True)
+        
         processed = {}
+        
         for ticker in tickers:
-            df = data[ticker].copy() if len(tickers) > 1 else data.copy()
+            # CORRECCIÓ 2: Gestió d'errors si un ticker falla
+            try:
+                if len(tickers) > 1:
+                    # Comprovem si el ticker existeix a les dades baixades
+                    if ticker not in data.columns.levels[0]:
+                        continue
+                    df = data[ticker].copy()
+                else:
+                    df = data.copy()
+            except KeyError:
+                continue
+
+            # CORRECCIÓ 3: Comprovació de dades buides
             if df.empty: continue
+            
+            # Neteja de nuls
             df = df.dropna()
+            
+            # Necessitem mínim 20 files per calcular EMA
+            if len(df) < 20: continue
+
+            # --- INDICADORS ---
             df['EMA'] = ta.ema(df['Close'], length=20)
             df['RSI'] = ta.rsi(df['Close'], length=14)
-            adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-            df['ADX'] = adx_df[adx_df.columns[0]] if adx_df is not None else 0
+            
+            # ADX
+            try:
+                adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+                df['ADX'] = adx_df[adx_df.columns[0]] if adx_df is not None else 0
+            except:
+                df['ADX'] = 0
+
+            # Volum
             df['VOL_SMA'] = ta.sma(df['Volume'], length=20)
-            processed[ticker] = df.tail(2)
+            
+            # Neteja final després de calcular indicadors
+            df = df.dropna()
+
+            # Guardem només si queden dades
+            if not df.empty:
+                processed[ticker] = df.tail(2)
+            
         return processed
-    except: return {}
+    except Exception as e:
+        print(f"Error general baixant dades: {e}")
+        return {}
 
 # ---------------------------------------------------------
 # 5. BUCLE PRINCIPAL
 # ---------------------------------------------------------
 
-st.title("💾 Bot amb Memòria Persistent")
-st.caption("Ara pots refrescar la pàgina sense perdre els diners virtuals.")
+st.title("🛡️ Bot MaxProfit (Secure Mode)")
+st.caption("Mode segur actiu: Protecció contra fallades de Yahoo Finance i reinicis.")
 
+# Mètriques
 c1, c2, c3 = st.columns(3)
 c1.metric("Capital", f"{st.session_state.balance:.2f} $")
 total = st.session_state.wins + st.session_state.losses
@@ -139,11 +179,9 @@ placeholder = st.empty()
 
 while True:
     with placeholder.container():
-        st.write(f"📡 Analitzant... {datetime.now().strftime('%H:%M:%S')}")
+        st.write(f"📡 Rastrejant... {datetime.now().strftime('%H:%M:%S')}")
         
         market_data = get_data_optimized(TICKERS)
-        
-        # Variable per saber si hem de guardar canvis al disc
         changes_made = False
         
         if market_data:
@@ -153,15 +191,23 @@ while True:
                 if ticker not in market_data: continue
                 
                 df = market_data[ticker]
+                
+                # CORRECCIÓ 4: CRÍTICA - Comprovació de longitud abans d'accedir
+                if len(df) < 2:
+                    continue
+
                 curr = df.iloc[-1]
                 prev = df.iloc[-2]
-                current_price = float(curr['Close'])
                 
+                # Protecció extra contra valors nuls puntuals
+                if pd.isna(curr['Close']): continue
+                
+                current_price = float(curr['Close'])
                 item = st.session_state.portfolio[ticker]
                 
-                # --- LÒGICA ---
+                # --- LÒGICA TRADING ---
                 if item['status'] == 'CASH':
-                    # Condicions d'entrada
+                    # Check segur dels indicadors
                     trend_ok = current_price > curr['EMA']
                     rsi_ok = (prev['RSI'] < curr['RSI']) and (45 < curr['RSI'] < 70)
                     adx_ok = curr['ADX'] > 20
@@ -176,11 +222,11 @@ while True:
                         item['target_price'] = current_price * (1 + raw_move)
                         item['stop_price'] = current_price * (1 - STOP_LOSS_PCT)
                         
-                        send_telegram(f"🔵 COMPRA: {ticker} a {current_price:.2f}$")
+                        send_telegram(f"🔵 COMPRA: {ticker} a {current_price:.2f}$ (ADX: {curr['ADX']:.1f})")
                         changes_made = True
 
                 elif item['status'] == 'INVESTED':
-                    # Sortides
+                    # Take Profit
                     if current_price >= item['target_price']:
                         profit = item['amount_invested'] * TARGET_PROFIT
                         st.session_state.balance += profit
@@ -190,6 +236,7 @@ while True:
                         send_telegram(f"✅ WIN: {ticker}\nBenefici: +1.5%")
                         changes_made = True
                     
+                    # Stop Loss
                     elif current_price <= item['stop_price']:
                         loss = item['amount_invested'] * (STOP_LOSS_PCT * LEVERAGE)
                         st.session_state.balance -= loss
@@ -205,11 +252,11 @@ while True:
                     color = "green" if item['status'] == 'INVESTED' else "gray"
                     st.markdown(f"**{ticker}**: {current_price:.2f}$ <span style='color:{color}'>●</span>", unsafe_allow_html=True)
 
-        # SI HI HA HAGUT CANVIS, GUARDEM AL DISC DUR
         if changes_made:
             save_state()
 
         if st.session_state.history:
-            st.dataframe(pd.DataFrame(st.session_state.history).iloc[::-1].head(5), height=200)
+            st.dataframe(pd.DataFrame(st.session_state.history).iloc[::-1].head(5), height=150)
 
+    # Espera de 60 segons
     time.sleep(60)
