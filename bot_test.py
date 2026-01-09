@@ -9,14 +9,14 @@ import json
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "SNIPER" (Més Seguretat, Menys Risc)
+# 1. CONFIGURACIÓ "EQUILIBRADA"
 # ---------------------------------------------------------
-st.set_page_config(page_title="Sniper Bot 0.6%", layout="wide", page_icon="🎯")
+st.set_page_config(page_title="Bot Equilibrat 0.85%", layout="wide", page_icon="⚖️")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# CARTERA (Mantenim la diversificació)
+# CARTERA (Diversificada)
 TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
 
 TIMEFRAME = "1m"        
@@ -26,15 +26,15 @@ LEVERAGE = 5
 ALLOCATION_PCT = 0.10   # 10% per operació
 MAX_POSITIONS = 10      
 
-# NOUS OBJECTIUS (SCALPING RÀPID)
-TARGET_NET_PROFIT = 0.006  # 0.6% Net (Sortida Ràpida)
-STOP_LOSS_PCT = 0.006      # 0.6% Stop (Ratio 1:1)
+# NOUS OBJECTIUS (MODIFICATS)
+TARGET_NET_PROFIT = 0.0085  # 0.85% Net
+STOP_LOSS_PCT = 0.0085      # 0.85% Stop (Ratio 1:1)
 
-# Comissions estimades (Spread/Swap)
+# Comissions estimades
 COMMISSION_RATE = 0.001 
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_sniper_data.json"
+DATA_FILE = "bot_balanced_data.json"
 
 # ---------------------------------------------------------
 # 2. PERSISTÈNCIA
@@ -71,7 +71,7 @@ if saved_data:
         st.session_state.losses = saved_data.get('losses', 0)
         st.session_state.portfolio = saved_data.get('portfolio', {})
         st.session_state.history = saved_data.get('history', [])
-        st.toast("🎯 Bot Sniper carregat.")
+        st.toast("⚖️ Bot Equilibrat carregat.")
 else:
     if 'balance' not in st.session_state:
         st.session_state.balance = INITIAL_CAPITAL 
@@ -89,19 +89,19 @@ if len(st.session_state.history) > 50:
     st.session_state.history = st.session_state.history[-50:]
 
 # ---------------------------------------------------------
-# 3. MOTOR D'ANÀLISI (NOVA ESTRATÈGIA)
+# 3. MOTOR D'ANÀLISI
 # ---------------------------------------------------------
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🎯 [SNIPER 0.6%]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚖️ [BOT 0.85%]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
-def get_data_sniper(tickers):
+def get_data_balanced(tickers):
     try:
-        # Necessitem més històric (10d) per calcular bé l'EMA 200
+        # Baixem 5 dies per tenir dades sòlides
         data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -113,29 +113,23 @@ def get_data_sniper(tickers):
                     df = data.copy()
             except: continue
 
-            if df.empty or len(df) < 200: continue # Necessitem 200 espelmes mínim
+            if df.empty or len(df) < 50: continue # Mínim 50 espelmes per la EMA
             df = df.dropna()
 
-            # --- INDICADORS DE SEGURETAT ---
+            # --- NOUS INDICADORS (TERME MIG) ---
             
-            # 1. EMA 200 (Filtre de Tendència Major)
-            df['EMA_200'] = ta.ema(df['Close'], length=200)
+            # 1. EMA 50 (Filtre de Tendència Intermèdia)
+            # Molt més reactiva que la de 200, però més segura que la de 20.
+            df['EMA_50'] = ta.ema(df['Close'], length=50)
             
-            # 2. ADX (Força de tendència - volem > 25)
+            # 2. RSI (Momentum Clàssic)
+            df['RSI'] = ta.rsi(df['Close'], length=14)
+            
+            # 3. ADX (Opcional: només per evitar mercat totalment mort)
             try:
                 adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
                 df['ADX'] = adx[adx.columns[0]] if adx is not None else 0
             except: df['ADX'] = 0
-
-            # 3. STOCH RSI (Per comprar al "Dip")
-            # Això ens diu si està sobrevenut a curt termini
-            stoch = ta.stochrsi(df['Close'], length=14, rsi_length=14, k=3, d=3)
-            if stoch is not None:
-                df['STOCH_K'] = stoch[stoch.columns[0]] # Línia ràpida
-                df['STOCH_D'] = stoch[stoch.columns[1]] # Línia lenta
-            else:
-                df['STOCH_K'] = 50
-                df['STOCH_D'] = 50
 
             df = df.dropna()
             if not df.empty:
@@ -146,8 +140,8 @@ def get_data_sniper(tickers):
 # ---------------------------------------------------------
 # 4. BUCLE PRINCIPAL
 # ---------------------------------------------------------
-st.title("🎯 Bot Sniper: Objectiu 0.6% Segur")
-st.caption("Estratègia: 'Pullback' (Comprar caigudes en tendència alcista). Filtre EMA 200 + StochRSI.")
+st.title("⚖️ Bot Equilibrat: Objectiu 0.85%")
+st.caption("Estratègia: Trend (EMA 50) + Momentum (RSI > 50). Ni massa agressiu, ni massa lent.")
 
 current_equity = st.session_state.balance
 positions_count = 0
@@ -156,7 +150,7 @@ placeholder = st.empty()
 
 while True:
     with placeholder.container():
-        market_data = get_data_sniper(TICKERS)
+        market_data = get_data_balanced(TICKERS)
         changes_made = False
         
         temp_equity = st.session_state.balance
@@ -166,6 +160,8 @@ while True:
         for i, ticker in enumerate(TICKERS):
             item = st.session_state.portfolio[ticker]
             current_price = 0.0
+            
+            # Inicialitzem variables per evitar errors visuals
             net_pnl = 0.0
             net_pnl_pct = 0.0
 
@@ -192,7 +188,7 @@ while True:
                 
                 temp_equity += (item['invested'] + net_pnl)
 
-                # SORTIDA: Més ràpida (0.6%)
+                # SORTIDA: 0.85% Net
                 if net_pnl_pct >= TARGET_NET_PROFIT:
                     st.session_state.balance += (item['invested'] + net_pnl)
                     st.session_state.wins += 1
@@ -200,7 +196,7 @@ while True:
                         'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$ ({net_pnl_pct*100:.2f}%)"
                     })
                     item['status'] = 'CASH'
-                    send_telegram(f"✅ WIN: {ticker}\nBenefici: +{net_pnl:.2f}$ (+0.6%)")
+                    send_telegram(f"✅ WIN: {ticker}\nBenefici: +{net_pnl:.2f}$ (+0.85%)")
                     changes_made = True
                 
                 elif net_pnl_pct <= -STOP_LOSS_PCT:
@@ -214,7 +210,7 @@ while True:
                     send_telegram(f"❌ LOSS: {ticker}\nPèrdua: {net_pnl:.2f}$")
                     changes_made = True
 
-            # --- ENTRADA: ESTRATÈGIA MÉS SEGURA ---
+            # --- ENTRADA: ESTRATÈGIA EQUILIBRADA ---
             elif item['status'] == 'CASH' and market_data and ticker in market_data:
                 df = market_data[ticker]
                 if len(df) >= 2:
@@ -226,27 +222,29 @@ while True:
                     
                     if st.session_state.balance >= trade_size:
                         
-                        # 1. SEGURETAT: Estem per sobre de la mitjana de 200 sessions?
-                        # Si el preu està per sota de l'EMA 200, la tendència és baixista i NO comprem.
-                        trend_safe = current_price > curr['EMA_200']
+                        # 1. TENDÈNCIA: Preu per sobre de l'EMA 50
+                        # Això indica que a curt/mig termini la tendència és alcista.
+                        # Molt més fàcil de complir que l'EMA 200.
+                        trend_ok = current_price > curr['EMA_50']
                         
-                        # 2. FORÇA: La tendència té força real?
-                        adx_strong = curr['ADX'] > 25
+                        # 2. MOMENTUM: RSI creua 50 cap amunt
+                        # Indiquem que la força compradora està guanyant terreny.
+                        # Evitem comprar si ja està massa car (RSI > 70)
+                        rsi_rising = (prev['RSI'] < 50) and (curr['RSI'] > 50)
+                        not_overbought = curr['RSI'] < 70
                         
-                        # 3. OPORTUNITAT (DIP): Estem comprant barat?
-                        # StochRSI per sota de 20 (sobrevenut) i creuant cap amunt (K > D)
-                        stoch_oversold = prev['STOCH_K'] < 20
-                        stoch_crossing_up = (prev['STOCH_K'] < prev['STOCH_D']) and (curr['STOCH_K'] > curr['STOCH_D'])
-                        dip_entry = stoch_oversold and stoch_crossing_up
+                        # 3. ACTIVITAT: ADX > 20
+                        # Ens assegurem que el mercat no estigui totalment pla.
+                        adx_ok = curr['ADX'] > 20
                         
-                        # NOMÉS SI ES COMPLEIX TOT
-                        if trend_safe and adx_strong and dip_entry:
+                        # ENTRADA
+                        if trend_ok and rsi_rising and not_overbought and adx_ok:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = current_price
                             item['invested'] = trade_size
                             
                             st.session_state.balance -= trade_size
-                            send_telegram(f"🎯 SNIPER ENTRY: {ticker}\nPreu > EMA200 (Tendència OK)\nStochRSI < 20 (Preu Barat)\nInversió: {trade_size:.2f}$")
+                            send_telegram(f"⚖️ ENTRADA: {ticker}\nPreu > EMA50 + RSI Creuant 50\nInversió: {trade_size:.2f}$")
                             changes_made = True
             
             # --- VISUALITZACIÓ ---
