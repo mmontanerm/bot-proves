@@ -9,14 +9,14 @@ import json
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "EQUILIBRADA"
+# 1. CONFIGURACIÓ FLEXIBLE
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Equilibrat 0.85%", layout="wide", page_icon="⚖️")
+st.set_page_config(page_title="Bot Flexible 0.85%", layout="wide", page_icon="⚡")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# CARTERA (Diversificada)
+# CARTERA
 TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
 
 TIMEFRAME = "1m"        
@@ -26,15 +26,13 @@ LEVERAGE = 5
 ALLOCATION_PCT = 0.10   # 10% per operació
 MAX_POSITIONS = 10      
 
-# NOUS OBJECTIUS (MODIFICATS)
+# OBJECTIUS
 TARGET_NET_PROFIT = 0.0085  # 0.85% Net
-STOP_LOSS_PCT = 0.0085      # 0.85% Stop (Ratio 1:1)
-
-# Comissions estimades
+STOP_LOSS_PCT = 0.0085      # 0.85% Stop
 COMMISSION_RATE = 0.001 
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_balanced_data.json"
+DATA_FILE = "bot_flex_data.json"
 
 # ---------------------------------------------------------
 # 2. PERSISTÈNCIA
@@ -71,7 +69,7 @@ if saved_data:
         st.session_state.losses = saved_data.get('losses', 0)
         st.session_state.portfolio = saved_data.get('portfolio', {})
         st.session_state.history = saved_data.get('history', [])
-        st.toast("⚖️ Bot Equilibrat carregat.")
+        st.toast("⚡ Bot Flexible carregat.")
 else:
     if 'balance' not in st.session_state:
         st.session_state.balance = INITIAL_CAPITAL 
@@ -95,13 +93,12 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚖️ [BOT 0.85%]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚡ [BOT FLEXIBLE]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
-def get_data_balanced(tickers):
+def get_data_flexible(tickers):
     try:
-        # Baixem 5 dies per tenir dades sòlides
         data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -113,19 +110,19 @@ def get_data_balanced(tickers):
                     df = data.copy()
             except: continue
 
-            if df.empty or len(df) < 50: continue # Mínim 50 espelmes per la EMA
+            if df.empty or len(df) < 50: continue
             df = df.dropna()
 
-            # --- NOUS INDICADORS (TERME MIG) ---
+            # --- INDICADORS FLEXIBLES ---
             
-            # 1. EMA 50 (Filtre de Tendència Intermèdia)
-            # Molt més reactiva que la de 200, però més segura que la de 20.
-            df['EMA_50'] = ta.ema(df['Close'], length=50)
+            # 1. EMA 20 (Tendència Ràpida/Flexible)
+            # Canviem la de 50 per la de 20. Això dóna entrades molt més ràpides.
+            df['EMA_20'] = ta.ema(df['Close'], length=20)
             
-            # 2. RSI (Momentum Clàssic)
+            # 2. RSI (Momentum)
             df['RSI'] = ta.rsi(df['Close'], length=14)
             
-            # 3. ADX (Opcional: només per evitar mercat totalment mort)
+            # 3. ADX (Mantenim filtre bàsic d'activitat)
             try:
                 adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
                 df['ADX'] = adx[adx.columns[0]] if adx is not None else 0
@@ -140,8 +137,8 @@ def get_data_balanced(tickers):
 # ---------------------------------------------------------
 # 4. BUCLE PRINCIPAL
 # ---------------------------------------------------------
-st.title("⚖️ Bot Equilibrat: Objectiu 0.85%")
-st.caption("Estratègia: Trend (EMA 50) + Momentum (RSI > 50). Ni massa agressiu, ni massa lent.")
+st.title("⚡ Bot Flexible: Objectiu 0.85%")
+st.caption("Estratègia: EMA 20 (Ràpida) + RSI Cross 50. Entrades més freqüents.")
 
 current_equity = st.session_state.balance
 positions_count = 0
@@ -150,7 +147,7 @@ placeholder = st.empty()
 
 while True:
     with placeholder.container():
-        market_data = get_data_balanced(TICKERS)
+        market_data = get_data_flexible(TICKERS)
         changes_made = False
         
         temp_equity = st.session_state.balance
@@ -161,7 +158,6 @@ while True:
             item = st.session_state.portfolio[ticker]
             current_price = 0.0
             
-            # Inicialitzem variables per evitar errors visuals
             net_pnl = 0.0
             net_pnl_pct = 0.0
 
@@ -177,7 +173,6 @@ while True:
             if item['status'] == 'INVESTED' and current_price > 0:
                 positions_count += 1
                 
-                # Càlcul P&L
                 gross_value = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
                 lev_invested = item['invested'] * LEVERAGE
                 gross_pnl = gross_value - lev_invested
@@ -188,7 +183,7 @@ while True:
                 
                 temp_equity += (item['invested'] + net_pnl)
 
-                # SORTIDA: 0.85% Net
+                # SORTIDA
                 if net_pnl_pct >= TARGET_NET_PROFIT:
                     st.session_state.balance += (item['invested'] + net_pnl)
                     st.session_state.wins += 1
@@ -210,7 +205,7 @@ while True:
                     send_telegram(f"❌ LOSS: {ticker}\nPèrdua: {net_pnl:.2f}$")
                     changes_made = True
 
-            # --- ENTRADA: ESTRATÈGIA EQUILIBRADA ---
+            # --- ENTRADA: ESTRATÈGIA FLEXIBLE ---
             elif item['status'] == 'CASH' and market_data and ticker in market_data:
                 df = market_data[ticker]
                 if len(df) >= 2:
@@ -222,19 +217,15 @@ while True:
                     
                     if st.session_state.balance >= trade_size:
                         
-                        # 1. TENDÈNCIA: Preu per sobre de l'EMA 50
-                        # Això indica que a curt/mig termini la tendència és alcista.
-                        # Molt més fàcil de complir que l'EMA 200.
-                        trend_ok = current_price > curr['EMA_50']
+                        # 1. TENDÈNCIA FLEXIBLE (EMA 20)
+                        # Molt menys restrictiva que la de 50.
+                        trend_ok = current_price > curr['EMA_20']
                         
-                        # 2. MOMENTUM: RSI creua 50 cap amunt
-                        # Indiquem que la força compradora està guanyant terreny.
-                        # Evitem comprar si ja està massa car (RSI > 70)
+                        # 2. MOMENTUM (RSI Cross 50) - MANTINGUT
                         rsi_rising = (prev['RSI'] < 50) and (curr['RSI'] > 50)
-                        not_overbought = curr['RSI'] < 70
                         
-                        # 3. ACTIVITAT: ADX > 20
-                        # Ens assegurem que el mercat no estigui totalment pla.
+                        # Filtre bàsic per no comprar sostres
+                        not_overbought = curr['RSI'] < 75 
                         adx_ok = curr['ADX'] > 20
                         
                         # ENTRADA
@@ -244,7 +235,7 @@ while True:
                             item['invested'] = trade_size
                             
                             st.session_state.balance -= trade_size
-                            send_telegram(f"⚖️ ENTRADA: {ticker}\nPreu > EMA50 + RSI Creuant 50\nInversió: {trade_size:.2f}$")
+                            send_telegram(f"⚡ ENTRADA RÀPIDA: {ticker}\nPreu > EMA20 + RSI Cross\nInversió: {trade_size:.2f}$")
                             changes_made = True
             
             # --- VISUALITZACIÓ ---
