@@ -6,100 +6,66 @@ import requests
 import time
 import os
 import json
+import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "ACTIVA"
+# 1. CONFIGURACIÓ
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Actiu 0.85%", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Bot 24/7 Background", layout="wide", page_icon="👻")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# CARTERA
 TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
-
 TIMEFRAME = "1m"        
 LEVERAGE = 5            
-
-# GESTIÓ DE CAPITAL
-ALLOCATION_PCT = 0.10   # 10% per operació
-MAX_POSITIONS = 10      
-
-# OBJECTIUS
-TARGET_NET_PROFIT = 0.0085  # 0.85% Net
-STOP_LOSS_PCT = 0.0085      # 0.85% Stop
-COMMISSION_RATE = 0.001     # 0.1% Comissió estimada
-
+ALLOCATION_PCT = 0.10   
+TARGET_NET_PROFIT = 0.0085  
+STOP_LOSS_PCT = 0.0085      
+COMMISSION_RATE = 0.001 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_active_data.json"
+DATA_FILE = "bot_background_data.json"
 
 # ---------------------------------------------------------
-# 2. PERSISTÈNCIA
+# 2. FUNCIONS DE GESTIÓ DE DADES (JSON)
 # ---------------------------------------------------------
-def save_state():
-    data = {
-        'balance': st.session_state.balance,
-        'equity': st.session_state.equity,
-        'wins': st.session_state.wins,
-        'losses': st.session_state.losses,
-        'portfolio': st.session_state.portfolio,
-        'history': st.session_state.history,
-        'last_update': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# Aquestes funcions han de ser independents de Streamlit per funcionar en segon pla
+
+def load_data():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, 'r') as f:
+                return json.load(f)
+        except: pass
+    
+    # Si no existeix, retornem estructura per defecte
+    return {
+        'balance': INITIAL_CAPITAL,
+        'equity': INITIAL_CAPITAL,
+        'wins': 0,
+        'losses': 0,
+        'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0} for t in TICKERS},
+        'history': [],
+        'last_update': "Mai"
     }
+
+def save_data(data):
     try:
         with open(DATA_FILE, 'w') as f:
             json.dump(data, f)
     except: pass
 
-def load_state():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, 'r') as f:
-                return json.load(f)
-        except: return None
-    return None
-
-saved_data = load_state()
-if saved_data:
-    if 'balance' not in st.session_state:
-        st.session_state.balance = saved_data.get('balance', INITIAL_CAPITAL)
-        st.session_state.equity = saved_data.get('equity', INITIAL_CAPITAL)
-        st.session_state.wins = saved_data.get('wins', 0)
-        st.session_state.losses = saved_data.get('losses', 0)
-        st.session_state.portfolio = saved_data.get('portfolio', {})
-        st.session_state.history = saved_data.get('history', [])
-        st.toast("⚡ Bot Actiu carregat.")
-else:
-    if 'balance' not in st.session_state:
-        st.session_state.balance = INITIAL_CAPITAL 
-        st.session_state.equity = INITIAL_CAPITAL  
-        st.session_state.wins = 0
-        st.session_state.losses = 0
-        st.session_state.history = []
-    if 'portfolio' not in st.session_state:
-        st.session_state.portfolio = {
-            t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0, 'shares': 0.0, 'stop': 0.0, 'target': 0.0} 
-            for t in TICKERS
-        }
-
-if len(st.session_state.history) > 50:
-    st.session_state.history = st.session_state.history[-50:]
-
-# ---------------------------------------------------------
-# 3. MOTOR D'ANÀLISI
-# ---------------------------------------------------------
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚡ [BOT ACTIU]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"👻 [BOT BACKGROUND]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
-def get_data_active(tickers):
+def get_market_data(tickers):
     try:
-        # Baixem dades
         data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -111,163 +77,181 @@ def get_data_active(tickers):
                     df = data.copy()
             except: continue
 
-            if df.empty or len(df) < 30: continue 
+            if df.empty or len(df) < 30: continue
             df = df.dropna()
-
-            # --- INDICADORS ---
+            
+            # Indicadors
             df['EMA_20'] = ta.ema(df['Close'], length=20)
             df['RSI'] = ta.rsi(df['Close'], length=14)
-            
             df = df.dropna()
+            
             if not df.empty:
                 processed[ticker] = df.tail(2)
         return processed
     except: return {}
 
 # ---------------------------------------------------------
-# 4. BUCLE PRINCIPAL
+# 3. EL CERVELL (BACKGROUND THREAD)
 # ---------------------------------------------------------
-st.title("⚡ Bot Actiu: Entrades Dinàmiques")
-st.caption("Estratègia Relaxada: Si el preu puja i RSI està saludable (>40 i <70), COMPRA.")
+# Aquesta funció s'executa en un fil paral·lel i NO depèn del navegador
 
-current_equity = st.session_state.balance
-positions_count = 0
+def run_trading_logic():
+    print("🚀 CERVELL ARRENCAT: El bot està treballant en segon pla...")
+    
+    while True:
+        try:
+            # 1. Carreguem l'estat actual del disc
+            data = load_data()
+            portfolio = data['portfolio']
+            balance = data['balance']
+            equity = data['equity']
+            
+            # 2. Baixem dades de mercat
+            market_data = get_market_data(TICKERS)
+            changes = False
+            
+            temp_equity = balance # Recalculem equity
+            
+            # 3. Bucle d'anàlisi
+            for ticker in TICKERS:
+                item = portfolio[ticker]
+                current_price = 0.0
+                
+                if market_data and ticker in market_data:
+                    current_price = float(market_data[ticker].iloc[-1]['Close'])
+                
+                # Si no tenim preu actual però estem invertits, usem el d'entrada com a referència
+                if current_price == 0 and item['status'] == 'INVESTED':
+                    current_price = item['entry_price']
+                
+                # --- LÒGICA TRADING ---
+                if item['status'] == 'INVESTED' and current_price > 0:
+                    gross_val = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
+                    lev_invested = item['invested'] * LEVERAGE
+                    net_pnl = (gross_val - lev_invested) - (lev_invested * COMMISSION_RATE)
+                    net_pnl_pct = net_pnl / item['invested']
+                    
+                    temp_equity += (item['invested'] + net_pnl)
+                    
+                    # SORTIDA
+                    if net_pnl_pct >= TARGET_NET_PROFIT:
+                        balance += (item['invested'] + net_pnl)
+                        data['wins'] += 1
+                        data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
+                        item['status'] = 'CASH'
+                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)")
+                        changes = True
+                    
+                    elif net_pnl_pct <= -STOP_LOSS_PCT:
+                        balance += (item['invested'] + net_pnl)
+                        data['losses'] += 1
+                        data['history'].append({'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$"})
+                        item['status'] = 'CASH'
+                        send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
+                        changes = True
+                        
+                elif item['status'] == 'CASH' and market_data and ticker in market_data:
+                    df = market_data[ticker]
+                    curr = df.iloc[-1]
+                    prev = df.iloc[-2]
+                    price = float(curr['Close'])
+                    
+                    # ENTRADA (Lògica Activa)
+                    trade_size = equity * ALLOCATION_PCT
+                    if balance >= trade_size:
+                        trend_ok = price > curr['EMA_20']
+                        rsi_ok = (curr['RSI'] > 40) and (curr['RSI'] < 70) and (curr['RSI'] > prev['RSI'])
+                        
+                        if trend_ok and rsi_ok:
+                            item['status'] = 'INVESTED'
+                            item['entry_price'] = price
+                            item['invested'] = trade_size
+                            balance -= trade_size
+                            send_telegram(f"🚀 ENTRADA: {ticker} a {price:.2f}$")
+                            changes = True
 
+            # Actualitzem dades globals
+            data['balance'] = balance
+            data['equity'] = temp_equity
+            data['portfolio'] = portfolio
+            data['last_update'] = datetime.now().strftime("%H:%M:%S")
+            
+            if changes:
+                save_data(data)
+            
+            # Guardem sempre l'última hora encara que no hi hagi canvis per saber que està viu
+            # (Però guardem cada minut per no cremar el disc)
+            if datetime.now().second < 5: 
+                save_data(data)
+
+        except Exception as e:
+            print(f"Error al fil de fons: {e}")
+        
+        # Esperem 60 segons abans de la següent volta
+        time.sleep(60)
+
+# Aquesta funció màgica arrenca el fil NOMÉS UN COP i el manté viu
+@st.cache_resource
+def start_background_bot():
+    if not os.path.exists(DATA_FILE):
+        save_data(load_data()) # Inicialitzar fitxer si no existeix
+    
+    # Creem i arrenquem el fil dimoni (Daemon Thread)
+    thread = threading.Thread(target=run_trading_logic, daemon=True)
+    thread.start()
+    return thread
+
+# ---------------------------------------------------------
+# 4. LA INTERFÍCIE WEB (VISOR)
+# ---------------------------------------------------------
+# Arrenquem el bot en segon pla (si no està ja en marxa)
+start_background_bot()
+
+st.title("👻 Bot 100% Autònom (Background)")
+st.caption("Aquest bot treballa en un fil paral·lel. Pots tancar la pestanya.")
+
+# Bucle visualització (només per refrescar la pantalla)
+# Això NO executa operacions, només llegeix el JSON
 placeholder = st.empty()
 
 while True:
+    data = load_data()
+    
     with placeholder.container():
-        market_data = get_data_active(TICKERS)
-        changes_made = False
+        st.write(f"🔄 Última activitat del cervell: **{data.get('last_update')}**")
         
-        temp_equity = st.session_state.balance
+        # Mètriques
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Equity", f"{data.get('equity', 0):.2f}$")
+        m2.metric("Cash", f"{data.get('balance', 0):.2f}$")
+        m3.metric("Wins", data.get('wins', 0))
+        m4.metric("Losses", data.get('losses', 0))
         
+        # Mostrar cartera
         cols = st.columns(5)
+        portfolio = data.get('portfolio', {})
         
         for i, ticker in enumerate(TICKERS):
-            item = st.session_state.portfolio[ticker]
-            current_price = 0.0
+            if ticker not in portfolio: continue
+            item = portfolio[ticker]
             
-            # Inicialitzem variables crítiques
-            net_pnl = 0.0
-            net_pnl_pct = 0.0
-
-            if market_data and ticker in market_data:
-                df = market_data[ticker]
-                if len(df) >= 1:
-                    current_price = float(df.iloc[-1]['Close'])
-            
-            if current_price == 0.0 and item['status'] == 'INVESTED':
-                current_price = item['entry_price']
-
-            # --- GESTIÓ POSICIONS (AMB COMISSIONS) ---
-            if item['status'] == 'INVESTED' and current_price > 0:
-                positions_count += 1
-                
-                # 1. Valor Brut (Palanquejat)
-                gross_value = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
-                lev_invested = item['invested'] * LEVERAGE
-                
-                # 2. Benefici Brut
-                gross_pnl = gross_value - lev_invested
-                
-                # 3. Cost de Comissió (Calculat sobre el volum total mogut)
-                commission_cost = lev_invested * COMMISSION_RATE
-                
-                # 4. Benefici NET (Això és el que compta)
-                net_pnl = gross_pnl - commission_cost
-                net_pnl_pct = (net_pnl / item['invested']) 
-                
-                temp_equity += (item['invested'] + net_pnl)
-
-                # SORTIDA (0.85% NET)
-                if net_pnl_pct >= TARGET_NET_PROFIT:
-                    st.session_state.balance += (item['invested'] + net_pnl)
-                    st.session_state.wins += 1
-                    st.session_state.history.append({
-                        'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$ ({net_pnl_pct*100:.2f}%)"
-                    })
-                    item['status'] = 'CASH'
-                    send_telegram(f"✅ WIN: {ticker}\nBenefici Net: +{net_pnl:.2f}$ (+0.85%)\n(Comissió pagada: {commission_cost:.2f}$)")
-                    changes_made = True
-                
-                elif net_pnl_pct <= -STOP_LOSS_PCT:
-                    remaining = item['invested'] + net_pnl
-                    st.session_state.balance += remaining
-                    st.session_state.losses += 1
-                    st.session_state.history.append({
-                        'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$ ({net_pnl_pct*100:.2f}%)"
-                    })
-                    item['status'] = 'CASH'
-                    send_telegram(f"❌ LOSS: {ticker}\nPèrdua Neta: {net_pnl:.2f}$")
-                    changes_made = True
-
-            # --- ENTRADA (LÒGICA NOVA - MENYS RESTRICTIVA) ---
-            elif item['status'] == 'CASH' and market_data and ticker in market_data:
-                df = market_data[ticker]
-                if len(df) >= 2:
-                    curr = df.iloc[-1]
-                    prev = df.iloc[-2]
-                    current_price = float(curr['Close'])
-                    
-                    trade_size = st.session_state.equity * ALLOCATION_PCT
-                    
-                    if st.session_state.balance >= trade_size:
-                        
-                        # 1. TENDÈNCIA (Mantenim EMA 20 perquè és seguretat bàsica)
-                        # Si el preu està per sobre de la mitjana de 20 minuts, anem bé.
-                        trend_ok = current_price > curr['EMA_20']
-                        
-                        # 2. ZONA RSI (Canvi important!)
-                        # Abans esperàvem el creuament exacte de 50.
-                        # Ara comprem si està en zona saludable (entre 40 i 70)
-                        rsi_zone_ok = (curr['RSI'] > 40) and (curr['RSI'] < 70)
-                        
-                        # 3. DIRECCIÓ RSI
-                        # Simplement volem que l'RSI estigui pujant (moment positiu)
-                        rsi_pointing_up = curr['RSI'] > prev['RSI']
-                        
-                        # ENTRADA
-                        if trend_ok and rsi_zone_ok and rsi_pointing_up:
-                            item['status'] = 'INVESTED'
-                            item['entry_price'] = current_price
-                            item['invested'] = trade_size
-                            
-                            st.session_state.balance -= trade_size
-                            send_telegram(f"🚀 ENTRADA: {ticker}\nPreu > EMA20 + RSI Pujant\nInversió: {trade_size:.2f}$")
-                            changes_made = True
-            
-            # --- VISUALITZACIÓ ---
-            col_idx = i % 5 
+            col_idx = i % 5
             with cols[col_idx]:
-                border = "green" if item['status'] == 'INVESTED' else "grey"
+                status = item['status']
+                border = "green" if status == 'INVESTED' else "grey"
                 with st.container(border=True):
                     st.markdown(f"**{ticker}**")
-                    if item['status'] == 'INVESTED':
-                        color = "green" if net_pnl > 0 else "red"
-                        st.markdown(f"<span style='color:{color}'>{net_pnl:.2f}$</span>", unsafe_allow_html=True)
-                        st.caption(f"Inv: {item['invested']:.0f}$")
+                    if status == 'INVESTED':
+                        st.markdown(f"🟢 INV: {item['invested']:.0f}$")
+                        st.caption(f"Entrada: {item['entry_price']:.2f}")
                     else:
-                        st.caption(f"{current_price:.2f}$")
+                        st.caption("CASH")
 
-        st.session_state.equity = temp_equity
-        
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Valor Compte", f"{st.session_state.equity:.2f} $")
-        m2.metric("Cash", f"{st.session_state.balance:.2f} $")
-        
-        open_pos = sum(1 for t in TICKERS if st.session_state.portfolio[t]['status'] == 'INVESTED')
-        m3.metric("Posicions", f"{open_pos} / 10")
-        
-        total = st.session_state.wins + st.session_state.losses
-        wr = (st.session_state.wins/total*100) if total > 0 else 0
-        m4.metric("Win Rate", f"{wr:.1f}%")
-
-        if changes_made:
-            save_state()
-
-        if st.session_state.history:
+        # Historial
+        hist = data.get('history', [])
+        if hist:
             st.write("---")
-            st.dataframe(pd.DataFrame(st.session_state.history).iloc[::-1].head(5))
+            st.dataframe(pd.DataFrame(hist).iloc[::-1].head(10))
 
-    time.sleep(60)
+    # Refresquem la pantalla cada 10 segons
+    time.sleep(10)
