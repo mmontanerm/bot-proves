@@ -10,25 +10,23 @@ import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "ELITE STRICT"
+# 1. CONFIGURACIÓ "LA FORTALESA" (MAX WIN RATE)
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Elite Strict", layout="wide", page_icon="👮‍♂️")
+st.set_page_config(page_title="Bot Fortress 24/7", layout="wide", page_icon="🏰")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# CARTERA
 TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
-
 TIMEFRAME = "1m"        
 LEVERAGE = 5            
-ALLOCATION_PCT = 0.10   
+ALLOCATION_PCT = 0.10       # 10% per operació
 TARGET_NET_PROFIT = 0.0085  # 0.85% Net
 STOP_LOSS_PCT = 0.0085      # 0.85% Stop
-COMMISSION_RATE = 0.001 
+COMMISSION_RATE = 0.001     # 0.1% Comissió
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_elite_data.json"
+DATA_FILE = "bot_fortress_data.json"
 
 # ---------------------------------------------------------
 # 2. FUNCIONS DADES
@@ -59,13 +57,13 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"👮‍♂️ [BOT ELITE]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🏰 [BOT FORTRESS]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
 def get_market_data(tickers):
     try:
-        # Necessitem històric suficient per l'EMA 200
+        # Baixem dades (mínim 200 espelmes)
         data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -77,25 +75,16 @@ def get_market_data(tickers):
                     df = data.copy()
             except: continue
 
-            if df.empty or len(df) < 200: continue # Mínim 200 espelmes OBLIGATORI
+            if df.empty or len(df) < 200: continue
             df = df.dropna()
             
-            # --- INDICADORS ELITE ---
+            # --- INDICADORS DE SEGURETAT ---
             
-            # 1. EMA 200 (Tendència Major - El filtre suprem)
+            # 1. EMA 200 (Filtre de Tendència Major)
             df['EMA_200'] = ta.ema(df['Close'], length=200)
             
-            # 2. EMA 50 (Tendència Curta)
-            df['EMA_50'] = ta.ema(df['Close'], length=50)
-            
-            # 3. RSI (Momentum)
+            # 2. RSI (Per detectar sobrevenda)
             df['RSI'] = ta.rsi(df['Close'], length=14)
-            
-            # 4. ADX (Força)
-            try:
-                adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-                df['ADX'] = adx_df[adx_df.columns[0]] if adx_df is not None else 0
-            except: df['ADX'] = 0
             
             df = df.dropna()
             
@@ -108,7 +97,7 @@ def get_market_data(tickers):
 # 3. CERVELL (BACKGROUND)
 # ---------------------------------------------------------
 def run_trading_logic():
-    print("👮‍♂️ CERVELL ELITE ARRENCAT (EMA200 + ADX>30)...")
+    print("🏰 CERVELL FORTRESS ARRENCAT (Buy The Dip)...")
     
     while True:
         try:
@@ -157,40 +146,36 @@ def run_trading_logic():
                         send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
                         changes = True
                         
-                # --- ENTRADA (LÒGICA MOLT RESTRICTIVA) ---
+                # --- ENTRADA (LÒGICA FORTALESA - BUY THE DIP) ---
                 elif item['status'] == 'CASH' and market_data and ticker in market_data:
                     df = market_data[ticker]
                     curr = df.iloc[-1]
-                    prev = df.iloc[-2]
                     price = float(curr['Close'])
                     
                     trade_size = equity * ALLOCATION_PCT
                     
                     if balance >= trade_size:
                         
-                        # 1. FILTRE SUPREM: Preu per sobre de EMA 200
-                        # Això garanteix que només comprem en tendència alcista clara de fons
-                        trend_major = price > curr['EMA_200']
+                        # 1. SEGURETAT SUPREMA: Preu > EMA 200
+                        # Només comprem accions que a llarg termini pugen.
+                        trend_ok = price > curr['EMA_200']
                         
-                        # 2. FILTRE CURT: Preu per sobre de EMA 50
-                        trend_minor = price > curr['EMA_50']
+                        # 2. OPORTUNITAT D'OR: RSI < 35 (Sobrevenut)
+                        # Comprem quan tothom ven per pànic. Aquí és on hi ha el rebot segur.
+                        oversold = curr['RSI'] < 35
                         
-                        # 3. FORÇA EXTREMA: ADX > 30 (Més exigent que abans)
-                        # Només entrem si el mercat té molta potència.
-                        adx_ok = curr['ADX'] > 30
-                        
-                        # 4. MOMENTUM CONFIRMAT: RSI > 55 però < 70
-                        # No entrem al 50 (dubte), entrem al 55 (confirmació).
-                        # I vigilem que no estigui ja sobrecomprat (>70).
-                        rsi_ok = (curr['RSI'] > 55) and (curr['RSI'] < 70) and (curr['RSI'] > prev['RSI'])
+                        # 3. CONFIRMACIÓ: Espelma Verda
+                        # Assegurem que l'espelma actual està pujant (Close > Open)
+                        # per no "agafar un ganivet que cau".
+                        green_candle = curr['Close'] > curr['Open']
                         
                         # TOT S'HA DE COMPLIR
-                        if trend_major and trend_minor and adx_ok and rsi_ok:
+                        if trend_ok and oversold and green_candle:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = price
                             item['invested'] = trade_size
                             balance -= trade_size
-                            send_telegram(f"👮‍♂️ ENTRADA ELITE: {ticker}\nPreu > EMA200\nADX: {curr['ADX']:.1f} (>30)\nRSI: {curr['RSI']:.1f}\nInv: {trade_size:.2f}$")
+                            send_telegram(f"🏰 ENTRADA FORTALESA: {ticker}\nPreu > EMA200 (Tendència OK)\nRSI: {curr['RSI']:.1f} (Zona Rebot)\nInv: {trade_size:.2f}$")
                             changes = True
 
             data['balance'] = balance
@@ -222,8 +207,8 @@ def start_background_bot():
 # ---------------------------------------------------------
 start_background_bot()
 
-st.title("👮‍♂️ Bot Elite Strict (24/7)")
-st.caption("Filtres Actius: EMA 200 + EMA 50 + ADX > 30. Màxima seguretat.")
+st.title("🏰 Bot Fortress 24/7 (Alta Seguretat)")
+st.caption("Estratègia: 'Buy The Dip'. Comprar caigudes (RSI<35) en tendències fortes (EMA200).")
 
 placeholder = st.empty()
 
@@ -255,7 +240,7 @@ while True:
                         st.markdown(f"🟢 {item['invested']:.0f}$")
                         st.caption(f"Ent: {item['entry_price']:.2f}")
                     else:
-                        st.caption("CASH")
+                        st.caption("CASH (Esperant Dip...)")
 
         hist = data.get('history', [])
         if hist:
