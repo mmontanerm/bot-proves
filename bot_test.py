@@ -9,9 +9,9 @@ import json
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ FLEXIBLE
+# 1. CONFIGURACIÓ "ACTIVA"
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Flexible 0.85%", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Bot Actiu 0.85%", layout="wide", page_icon="⚡")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -29,10 +29,10 @@ MAX_POSITIONS = 10
 # OBJECTIUS
 TARGET_NET_PROFIT = 0.0085  # 0.85% Net
 STOP_LOSS_PCT = 0.0085      # 0.85% Stop
-COMMISSION_RATE = 0.001 
+COMMISSION_RATE = 0.001     # 0.1% Comissió estimada
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_flex_data.json"
+DATA_FILE = "bot_active_data.json"
 
 # ---------------------------------------------------------
 # 2. PERSISTÈNCIA
@@ -69,7 +69,7 @@ if saved_data:
         st.session_state.losses = saved_data.get('losses', 0)
         st.session_state.portfolio = saved_data.get('portfolio', {})
         st.session_state.history = saved_data.get('history', [])
-        st.toast("⚡ Bot Flexible carregat.")
+        st.toast("⚡ Bot Actiu carregat.")
 else:
     if 'balance' not in st.session_state:
         st.session_state.balance = INITIAL_CAPITAL 
@@ -93,12 +93,13 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚡ [BOT FLEXIBLE]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚡ [BOT ACTIU]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
-def get_data_flexible(tickers):
+def get_data_active(tickers):
     try:
+        # Baixem dades
         data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -110,24 +111,13 @@ def get_data_flexible(tickers):
                     df = data.copy()
             except: continue
 
-            if df.empty or len(df) < 50: continue
+            if df.empty or len(df) < 30: continue 
             df = df.dropna()
 
-            # --- INDICADORS FLEXIBLES ---
-            
-            # 1. EMA 20 (Tendència Ràpida/Flexible)
-            # Canviem la de 50 per la de 20. Això dóna entrades molt més ràpides.
+            # --- INDICADORS ---
             df['EMA_20'] = ta.ema(df['Close'], length=20)
-            
-            # 2. RSI (Momentum)
             df['RSI'] = ta.rsi(df['Close'], length=14)
             
-            # 3. ADX (Mantenim filtre bàsic d'activitat)
-            try:
-                adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-                df['ADX'] = adx[adx.columns[0]] if adx is not None else 0
-            except: df['ADX'] = 0
-
             df = df.dropna()
             if not df.empty:
                 processed[ticker] = df.tail(2)
@@ -137,8 +127,8 @@ def get_data_flexible(tickers):
 # ---------------------------------------------------------
 # 4. BUCLE PRINCIPAL
 # ---------------------------------------------------------
-st.title("⚡ Bot Flexible: Objectiu 0.85%")
-st.caption("Estratègia: EMA 20 (Ràpida) + RSI Cross 50. Entrades més freqüents.")
+st.title("⚡ Bot Actiu: Entrades Dinàmiques")
+st.caption("Estratègia Relaxada: Si el preu puja i RSI està saludable (>40 i <70), COMPRA.")
 
 current_equity = st.session_state.balance
 positions_count = 0
@@ -147,7 +137,7 @@ placeholder = st.empty()
 
 while True:
     with placeholder.container():
-        market_data = get_data_flexible(TICKERS)
+        market_data = get_data_active(TICKERS)
         changes_made = False
         
         temp_equity = st.session_state.balance
@@ -158,6 +148,7 @@ while True:
             item = st.session_state.portfolio[ticker]
             current_price = 0.0
             
+            # Inicialitzem variables crítiques
             net_pnl = 0.0
             net_pnl_pct = 0.0
 
@@ -169,21 +160,27 @@ while True:
             if current_price == 0.0 and item['status'] == 'INVESTED':
                 current_price = item['entry_price']
 
-            # --- GESTIÓ POSICIONS ---
+            # --- GESTIÓ POSICIONS (AMB COMISSIONS) ---
             if item['status'] == 'INVESTED' and current_price > 0:
                 positions_count += 1
                 
+                # 1. Valor Brut (Palanquejat)
                 gross_value = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
                 lev_invested = item['invested'] * LEVERAGE
+                
+                # 2. Benefici Brut
                 gross_pnl = gross_value - lev_invested
+                
+                # 3. Cost de Comissió (Calculat sobre el volum total mogut)
                 commission_cost = lev_invested * COMMISSION_RATE
                 
+                # 4. Benefici NET (Això és el que compta)
                 net_pnl = gross_pnl - commission_cost
                 net_pnl_pct = (net_pnl / item['invested']) 
                 
                 temp_equity += (item['invested'] + net_pnl)
 
-                # SORTIDA
+                # SORTIDA (0.85% NET)
                 if net_pnl_pct >= TARGET_NET_PROFIT:
                     st.session_state.balance += (item['invested'] + net_pnl)
                     st.session_state.wins += 1
@@ -191,7 +188,7 @@ while True:
                         'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$ ({net_pnl_pct*100:.2f}%)"
                     })
                     item['status'] = 'CASH'
-                    send_telegram(f"✅ WIN: {ticker}\nBenefici: +{net_pnl:.2f}$ (+0.85%)")
+                    send_telegram(f"✅ WIN: {ticker}\nBenefici Net: +{net_pnl:.2f}$ (+0.85%)\n(Comissió pagada: {commission_cost:.2f}$)")
                     changes_made = True
                 
                 elif net_pnl_pct <= -STOP_LOSS_PCT:
@@ -202,10 +199,10 @@ while True:
                         'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$ ({net_pnl_pct*100:.2f}%)"
                     })
                     item['status'] = 'CASH'
-                    send_telegram(f"❌ LOSS: {ticker}\nPèrdua: {net_pnl:.2f}$")
+                    send_telegram(f"❌ LOSS: {ticker}\nPèrdua Neta: {net_pnl:.2f}$")
                     changes_made = True
 
-            # --- ENTRADA: ESTRATÈGIA FLEXIBLE ---
+            # --- ENTRADA (LÒGICA NOVA - MENYS RESTRICTIVA) ---
             elif item['status'] == 'CASH' and market_data and ticker in market_data:
                 df = market_data[ticker]
                 if len(df) >= 2:
@@ -217,25 +214,27 @@ while True:
                     
                     if st.session_state.balance >= trade_size:
                         
-                        # 1. TENDÈNCIA FLEXIBLE (EMA 20)
-                        # Molt menys restrictiva que la de 50.
+                        # 1. TENDÈNCIA (Mantenim EMA 20 perquè és seguretat bàsica)
+                        # Si el preu està per sobre de la mitjana de 20 minuts, anem bé.
                         trend_ok = current_price > curr['EMA_20']
                         
-                        # 2. MOMENTUM (RSI Cross 50) - MANTINGUT
-                        rsi_rising = (prev['RSI'] < 50) and (curr['RSI'] > 50)
+                        # 2. ZONA RSI (Canvi important!)
+                        # Abans esperàvem el creuament exacte de 50.
+                        # Ara comprem si està en zona saludable (entre 40 i 70)
+                        rsi_zone_ok = (curr['RSI'] > 40) and (curr['RSI'] < 70)
                         
-                        # Filtre bàsic per no comprar sostres
-                        not_overbought = curr['RSI'] < 75 
-                        adx_ok = curr['ADX'] > 20
+                        # 3. DIRECCIÓ RSI
+                        # Simplement volem que l'RSI estigui pujant (moment positiu)
+                        rsi_pointing_up = curr['RSI'] > prev['RSI']
                         
                         # ENTRADA
-                        if trend_ok and rsi_rising and not_overbought and adx_ok:
+                        if trend_ok and rsi_zone_ok and rsi_pointing_up:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = current_price
                             item['invested'] = trade_size
                             
                             st.session_state.balance -= trade_size
-                            send_telegram(f"⚡ ENTRADA RÀPIDA: {ticker}\nPreu > EMA20 + RSI Cross\nInversió: {trade_size:.2f}$")
+                            send_telegram(f"🚀 ENTRADA: {ticker}\nPreu > EMA20 + RSI Pujant\nInversió: {trade_size:.2f}$")
                             changes_made = True
             
             # --- VISUALITZACIÓ ---
@@ -247,6 +246,7 @@ while True:
                     if item['status'] == 'INVESTED':
                         color = "green" if net_pnl > 0 else "red"
                         st.markdown(f"<span style='color:{color}'>{net_pnl:.2f}$</span>", unsafe_allow_html=True)
+                        st.caption(f"Inv: {item['invested']:.0f}$")
                     else:
                         st.caption(f"{current_price:.2f}$")
 
