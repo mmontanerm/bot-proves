@@ -10,28 +10,28 @@ import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ STRICT (Background 24/7)
+# 1. CONFIGURACIÓ "ELITE STRICT"
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot 24/7 Strict", layout="wide", page_icon="🛡️")
+st.set_page_config(page_title="Bot Elite Strict", layout="wide", page_icon="👮‍♂️")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# CARTERA DIVERSIFICADA
+# CARTERA
 TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
 
 TIMEFRAME = "1m"        
 LEVERAGE = 5            
-ALLOCATION_PCT = 0.10       # 10% per operació
-TARGET_NET_PROFIT = 0.0085  # 0.85% Benefici Net
-STOP_LOSS_PCT = 0.0085      # 0.85% Stop Loss
-COMMISSION_RATE = 0.001     # 0.1% Comissió estimada per volum
+ALLOCATION_PCT = 0.10   
+TARGET_NET_PROFIT = 0.0085  # 0.85% Net
+STOP_LOSS_PCT = 0.0085      # 0.85% Stop
+COMMISSION_RATE = 0.001 
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_strict_data.json"
+DATA_FILE = "bot_elite_data.json"
 
 # ---------------------------------------------------------
-# 2. FUNCIONS DE DADES (JSON & TELEGRAM)
+# 2. FUNCIONS DADES
 # ---------------------------------------------------------
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -39,8 +39,6 @@ def load_data():
             with open(DATA_FILE, 'r') as f:
                 return json.load(f)
         except: pass
-    
-    # Estructura per defecte si no existeix fitxer
     return {
         'balance': INITIAL_CAPITAL,
         'equity': INITIAL_CAPITAL,
@@ -61,13 +59,13 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🛡️ [BOT STRICT]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"👮‍♂️ [BOT ELITE]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
 def get_market_data(tickers):
     try:
-        # Baixem 5 dies per tenir prou històric per l'EMA 50 i ADX
+        # Necessitem històric suficient per l'EMA 200
         data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -79,21 +77,23 @@ def get_market_data(tickers):
                     df = data.copy()
             except: continue
 
-            if df.empty or len(df) < 50: continue # Mínim 50 espelmes
+            if df.empty or len(df) < 200: continue # Mínim 200 espelmes OBLIGATORI
             df = df.dropna()
             
-            # --- INDICADORS STRICTES ---
+            # --- INDICADORS ELITE ---
             
-            # 1. EMA 50 (Filtre de Tendència Sòlida)
+            # 1. EMA 200 (Tendència Major - El filtre suprem)
+            df['EMA_200'] = ta.ema(df['Close'], length=200)
+            
+            # 2. EMA 50 (Tendència Curta)
             df['EMA_50'] = ta.ema(df['Close'], length=50)
             
-            # 2. RSI (Momentum)
+            # 3. RSI (Momentum)
             df['RSI'] = ta.rsi(df['Close'], length=14)
             
-            # 3. ADX (Filtre Anti-Lateral)
+            # 4. ADX (Força)
             try:
                 adx_df = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-                # pandas_ta retorna 3 columnes, agafem la primera (ADX_14)
                 df['ADX'] = adx_df[adx_df.columns[0]] if adx_df is not None else 0
             except: df['ADX'] = 0
             
@@ -105,12 +105,10 @@ def get_market_data(tickers):
     except: return {}
 
 # ---------------------------------------------------------
-# 3. EL CERVELL (BACKGROUND THREAD)
+# 3. CERVELL (BACKGROUND)
 # ---------------------------------------------------------
-# Aquest procés corre en paral·lel i mai s'atura mentre el servidor estigui encès
-
 def run_trading_logic():
-    print("🛡️ CERVELL STRICTE ARRENCAT: Vigilant ADX > 25 i EMA 50...")
+    print("👮‍♂️ CERVELL ELITE ARRENCAT (EMA200 + ADX>30)...")
     
     while True:
         try:
@@ -121,8 +119,6 @@ def run_trading_logic():
             
             market_data = get_market_data(TICKERS)
             changes = False
-            
-            # Recalculem l'equity actualitzada
             temp_equity = balance
             
             for ticker in TICKERS:
@@ -132,41 +128,36 @@ def run_trading_logic():
                 if market_data and ticker in market_data:
                     current_price = float(market_data[ticker].iloc[-1]['Close'])
                 
-                # Si no tenim preu actual però estem dins, usem referència antiga
                 if current_price == 0 and item['status'] == 'INVESTED':
                     current_price = item['entry_price']
                 
-                # --- A) GESTIÓ DE POSICIONS OBERTES ---
+                # --- GESTIÓ POSICIONS ---
                 if item['status'] == 'INVESTED' and current_price > 0:
-                    # 1. Valor Brut
                     gross_val = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
                     lev_invested = item['invested'] * LEVERAGE
-                    
-                    # 2. Càlcul de PnL Net (amb comissions d'entrada i sortida)
                     net_pnl = (gross_val - lev_invested) - (lev_invested * COMMISSION_RATE)
                     net_pnl_pct = net_pnl / item['invested']
                     
                     temp_equity += (item['invested'] + net_pnl)
                     
-                    # SORTIDA: TAKE PROFIT
+                    # Sortida (Mantenim els objectius)
                     if net_pnl_pct >= TARGET_NET_PROFIT:
                         balance += (item['invested'] + net_pnl)
                         data['wins'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
-                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$ | +{net_pnl_pct*100:.2f}%)")
+                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)")
                         changes = True
                     
-                    # SORTIDA: STOP LOSS
                     elif net_pnl_pct <= -STOP_LOSS_PCT:
                         balance += (item['invested'] + net_pnl)
                         data['losses'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
-                        send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$ | {net_pnl_pct*100:.2f}%)")
+                        send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
                         changes = True
                         
-                # --- B) ENTRADA (LÒGICA STRICTA) ---
+                # --- ENTRADA (LÒGICA MOLT RESTRICTIVA) ---
                 elif item['status'] == 'CASH' and market_data and ticker in market_data:
                     df = market_data[ticker]
                     curr = df.iloc[-1]
@@ -176,24 +167,32 @@ def run_trading_logic():
                     trade_size = equity * ALLOCATION_PCT
                     
                     if balance >= trade_size:
-                        # 1. TENDÈNCIA: EMA 50
-                        trend_ok = price > curr['EMA_50']
                         
-                        # 2. FORÇA: ADX > 25 (Filtre Clau Anti-Lateral)
-                        adx_ok = curr['ADX'] > 25
+                        # 1. FILTRE SUPREM: Preu per sobre de EMA 200
+                        # Això garanteix que només comprem en tendència alcista clara de fons
+                        trend_major = price > curr['EMA_200']
                         
-                        # 3. MOMENTUM: RSI > 50 i Pujant, però no sobrecomprat
-                        rsi_ok = (curr['RSI'] > 50) and (curr['RSI'] < 70) and (curr['RSI'] > prev['RSI'])
+                        # 2. FILTRE CURT: Preu per sobre de EMA 50
+                        trend_minor = price > curr['EMA_50']
                         
-                        if trend_ok and adx_ok and rsi_ok:
+                        # 3. FORÇA EXTREMA: ADX > 30 (Més exigent que abans)
+                        # Només entrem si el mercat té molta potència.
+                        adx_ok = curr['ADX'] > 30
+                        
+                        # 4. MOMENTUM CONFIRMAT: RSI > 55 però < 70
+                        # No entrem al 50 (dubte), entrem al 55 (confirmació).
+                        # I vigilem que no estigui ja sobrecomprat (>70).
+                        rsi_ok = (curr['RSI'] > 55) and (curr['RSI'] < 70) and (curr['RSI'] > prev['RSI'])
+                        
+                        # TOT S'HA DE COMPLIR
+                        if trend_major and trend_minor and adx_ok and rsi_ok:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = price
                             item['invested'] = trade_size
                             balance -= trade_size
-                            send_telegram(f"🛡️ ENTRADA STRICTA: {ticker}\nPreu > EMA50\nADX: {curr['ADX']:.1f} (Fort)\nRSI: {curr['RSI']:.1f} (Pujant)\nInv: {trade_size:.2f}$")
+                            send_telegram(f"👮‍♂️ ENTRADA ELITE: {ticker}\nPreu > EMA200\nADX: {curr['ADX']:.1f} (>30)\nRSI: {curr['RSI']:.1f}\nInv: {trade_size:.2f}$")
                             changes = True
 
-            # Actualitzem dades globals
             data['balance'] = balance
             data['equity'] = temp_equity
             data['portfolio'] = portfolio
@@ -202,34 +201,29 @@ def run_trading_logic():
             if changes:
                 save_data(data)
             
-            # Guardem periòdicament per mantenir el timestamp viu
             if datetime.now().second < 5: 
                 save_data(data)
 
         except Exception as e:
-            print(f"Error al fil de fons: {e}")
+            print(f"Error background: {e}")
         
-        # Espera de 60 segons abans del següent escaneig
         time.sleep(60)
 
-# Aquesta funció arrenca el fil NOMÉS UN COP
 @st.cache_resource
 def start_background_bot():
     if not os.path.exists(DATA_FILE):
         save_data(load_data()) 
-    
     thread = threading.Thread(target=run_trading_logic, daemon=True)
     thread.start()
     return thread
 
 # ---------------------------------------------------------
-# 4. LA INTERFÍCIE WEB (VISOR)
+# 4. WEB
 # ---------------------------------------------------------
-# Arrenquem el procés de fons
 start_background_bot()
 
-st.title("🛡️ Bot Strict 24/7 (Background)")
-st.caption("Filtres Actius: EMA 50 + ADX > 25 + RSI. Pots tancar la pestanya.")
+st.title("👮‍♂️ Bot Elite Strict (24/7)")
+st.caption("Filtres Actius: EMA 200 + EMA 50 + ADX > 30. Màxima seguretat.")
 
 placeholder = st.empty()
 
@@ -237,16 +231,14 @@ while True:
     data = load_data()
     
     with placeholder.container():
-        st.write(f"🔄 Últim escaneig del cervell: **{data.get('last_update')}**")
+        st.write(f"🔄 Últim escaneig: **{data.get('last_update')}**")
         
-        # Mètriques
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Equity Total", f"{data.get('equity', 0):.2f}$")
-        m2.metric("Cash Disponible", f"{data.get('balance', 0):.2f}$")
+        m1.metric("Equity", f"{data.get('equity', 0):.2f}$")
+        m2.metric("Cash", f"{data.get('balance', 0):.2f}$")
         m3.metric("Wins", data.get('wins', 0))
         m4.metric("Losses", data.get('losses', 0))
         
-        # Mostrar cartera
         cols = st.columns(5)
         portfolio = data.get('portfolio', {})
         
@@ -257,21 +249,17 @@ while True:
             col_idx = i % 5
             with cols[col_idx]:
                 status = item['status']
-                border = "green" if status == 'INVESTED' else "grey"
                 with st.container(border=True):
                     st.markdown(f"**{ticker}**")
                     if status == 'INVESTED':
-                        st.markdown(f"🟢 INV: {item['invested']:.0f}$")
-                        st.caption(f"Entrada: {item['entry_price']:.2f}")
+                        st.markdown(f"🟢 {item['invested']:.0f}$")
+                        st.caption(f"Ent: {item['entry_price']:.2f}")
                     else:
-                        st.caption("CASH (Vigilant...)")
+                        st.caption("CASH")
 
-        # Historial
         hist = data.get('history', [])
         if hist:
             st.write("---")
-            st.write("Historial d'Operacions:")
             st.dataframe(pd.DataFrame(hist).iloc[::-1].head(10))
 
-    # Refresquem la pantalla cada 10 segons (només visual)
     time.sleep(10)
