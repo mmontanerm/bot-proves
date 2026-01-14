@@ -10,9 +10,9 @@ import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "ÀGIL" (MÉS ENTRADES)
+# 1. CONFIGURACIÓ HÍBRIDA (Terme Mig)
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Àgil 24/7", layout="wide", page_icon="🐆")
+st.set_page_config(page_title="Bot Híbrid 24/7", layout="wide", page_icon="⚓")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -26,7 +26,7 @@ STOP_LOSS_PCT = 0.0085      # 0.85% Stop
 COMMISSION_RATE = 0.001     # 0.1% Comissió
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_agil_data.json"
+DATA_FILE = "bot_hybrid_data.json"
 
 # ---------------------------------------------------------
 # 2. FUNCIONS DADES
@@ -42,7 +42,7 @@ def load_data():
         'equity': INITIAL_CAPITAL,
         'wins': 0,
         'losses': 0,
-        'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0} for t in TICKERS},
+        'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0, 'pnl': 0.0, 'pnl_pct': 0.0} for t in TICKERS},
         'history': [],
         'last_update': "Mai"
     }
@@ -57,7 +57,7 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🐆 [BOT ÀGIL]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"⚓ [BOT HÍBRID]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
@@ -75,13 +75,13 @@ def get_market_data(tickers):
                     df = data.copy()
             except: continue
 
-            if df.empty or len(df) < 50: continue # Només necessitem 50 espelmes ara
+            if df.empty or len(df) < 100: continue # 100 espelmes per l'EMA 100
             df = df.dropna()
             
-            # --- INDICADORS ÀGILS ---
+            # --- INDICADORS HÍBRIDS ---
             
-            # 1. EMA 50 (Substitueix la 200 -> Molt més propera al preu)
-            df['EMA_50'] = ta.ema(df['Close'], length=50)
+            # 1. EMA 100 (El terme mig perfecte entre 50 i 200)
+            df['EMA_100'] = ta.ema(df['Close'], length=100)
             
             # 2. RSI
             df['RSI'] = ta.rsi(df['Close'], length=14)
@@ -97,7 +97,7 @@ def get_market_data(tickers):
 # 3. CERVELL (BACKGROUND)
 # ---------------------------------------------------------
 def run_trading_logic():
-    print("🐆 CERVELL ÀGIL ARRENCAT (EMA50 + RSI<60)...")
+    print("⚓ CERVELL HÍBRID ARRENCAT (EMA100 + RSI<50)...")
     
     while True:
         try:
@@ -127,6 +127,10 @@ def run_trading_logic():
                     net_pnl = (gross_val - lev_invested) - (lev_invested * COMMISSION_RATE)
                     net_pnl_pct = net_pnl / item['invested']
                     
+                    # ACTUALITZEM DADES EN TEMPS REAL PER AL VISUALITZADOR
+                    item['pnl'] = net_pnl
+                    item['pnl_pct'] = net_pnl_pct
+                    
                     temp_equity += (item['invested'] + net_pnl)
                     
                     # Sortida
@@ -135,6 +139,8 @@ def run_trading_logic():
                         data['wins'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
+                        item['pnl'] = 0.0 # Reset
+                        item['pnl_pct'] = 0.0
                         send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)")
                         changes = True
                     
@@ -143,10 +149,15 @@ def run_trading_logic():
                         data['losses'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
+                        item['pnl'] = 0.0 # Reset
+                        item['pnl_pct'] = 0.0
                         send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
                         changes = True
+                    
+                    # Guardem canvis petits (actualització de PnL visual) encara que no tanquem
+                    changes = True 
                         
-                # --- ENTRADA (LÒGICA REBAIXADA) ---
+                # --- ENTRADA (LÒGICA HÍBRIDA) ---
                 elif item['status'] == 'CASH' and market_data and ticker in market_data:
                     df = market_data[ticker]
                     curr = df.iloc[-1]
@@ -157,26 +168,23 @@ def run_trading_logic():
                     
                     if balance >= trade_size:
                         
-                        # 1. TENDÈNCIA FÀCIL: Preu > EMA 50
-                        # Ja no demanem la 200. Amb la 50 n'hi ha prou.
-                        trend_ok = price > curr['EMA_50']
+                        # 1. TENDÈNCIA: Preu > EMA 100
+                        # Més sòlida que la 50, menys lenta que la 200.
+                        trend_ok = price > curr['EMA_100']
                         
-                        # 2. OPORTUNITAT ÀMPLIA: RSI < 60
-                        # Acceptem entrades fins i tot si no ha baixat gaire (shallow pullback).
-                        # Abans era < 50, ara < 60.
-                        rsi_ok = curr['RSI'] < 60
+                        # 2. OPORTUNITAT: RSI < 50
+                        # Busquem una correcció real (meitat), no un petit ensurt.
+                        rsi_ok = curr['RSI'] < 50
                         
                         # 3. GIR: RSI Pujant
-                        # Confirma que no estem caient en picat.
                         rsi_rising = curr['RSI'] > prev['RSI']
                         
-                        # TOT S'HA DE COMPLIR
                         if trend_ok and rsi_ok and rsi_rising:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = price
                             item['invested'] = trade_size
                             balance -= trade_size
-                            send_telegram(f"🐆 ENTRADA ÀGIL: {ticker}\nPreu > EMA50\nRSI: {curr['RSI']:.1f} (<60 i pujant)\nInv: {trade_size:.2f}$")
+                            send_telegram(f"⚓ ENTRADA HÍBRIDA: {ticker}\nPreu > EMA100\nRSI: {curr['RSI']:.1f} (<50 i pujant)\nInv: {trade_size:.2f}$")
                             changes = True
 
             data['balance'] = balance
@@ -204,12 +212,12 @@ def start_background_bot():
     return thread
 
 # ---------------------------------------------------------
-# 4. WEB
+# 4. WEB (AMB VISUALITZACIÓ P&L)
 # ---------------------------------------------------------
 start_background_bot()
 
-st.title("🐆 Bot Àgil 24/7")
-st.caption("Estratègia: EMA 50 + RSI < 60. Molt menys restrictiva.")
+st.title("⚓ Bot Híbrid 24/7 (EMA 100)")
+st.caption("Estratègia: EMA 100 + RSI < 50. Equilibri entre seguretat i freqüència.")
 
 placeholder = st.empty()
 
@@ -217,11 +225,11 @@ while True:
     data = load_data()
     
     with placeholder.container():
-        st.write(f"🔄 Últim escaneig: **{data.get('last_update')}**")
+        st.write(f"🔄 Última actualització: **{data.get('last_update')}**")
         
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Equity", f"{data.get('equity', 0):.2f}$")
-        m2.metric("Cash", f"{data.get('balance', 0):.2f}$")
+        m1.metric("Equity Total", f"{data.get('equity', 0):.2f}$")
+        m2.metric("Cash Disponible", f"{data.get('balance', 0):.2f}$")
         m3.metric("Wins", data.get('wins', 0))
         m4.metric("Losses", data.get('losses', 0))
         
@@ -237,9 +245,17 @@ while True:
                 status = item['status']
                 with st.container(border=True):
                     st.markdown(f"**{ticker}**")
+                    
                     if status == 'INVESTED':
-                        st.markdown(f"🟢 {item['invested']:.0f}$")
-                        st.caption(f"Ent: {item['entry_price']:.2f}")
+                        # VISUALITZACIÓ DEL P&L EN TEMPS REAL
+                        pnl = item.get('pnl', 0.0)
+                        pnl_pct = item.get('pnl_pct', 0.0) * 100
+                        
+                        color = "green" if pnl >= 0 else "red"
+                        
+                        st.markdown(f"Inv: {item['invested']:.0f}$")
+                        st.markdown(f"**P&L: <span style='color:{color}'>{pnl:.2f}$ ({pnl_pct:.2f}%)</span>**", unsafe_allow_html=True)
+                        st.caption(f"Entrada: {item['entry_price']:.2f}")
                     else:
                         st.caption("CASH")
 
