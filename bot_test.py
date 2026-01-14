@@ -6,64 +6,102 @@ import requests
 import time
 import os
 import json
-import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "LA FORTALESA" (MAX WIN RATE)
+# 1. CONFIGURACIÓ "SNIPER" (Més Seguretat, Menys Risc)
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Fortress 24/7", layout="wide", page_icon="🏰")
+st.set_page_config(page_title="Sniper Bot 0.6%", layout="wide", page_icon="🎯")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
+# CARTERA (Mantenim la diversificació)
 TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
+
 TIMEFRAME = "1m"        
 LEVERAGE = 5            
-ALLOCATION_PCT = 0.10       # 10% per operació
-TARGET_NET_PROFIT = 0.0085  # 0.85% Net
-STOP_LOSS_PCT = 0.0085      # 0.85% Stop
-COMMISSION_RATE = 0.001     # 0.1% Comissió
+
+# GESTIÓ DE CAPITAL
+ALLOCATION_PCT = 0.10   # 10% per operació
+MAX_POSITIONS = 10      
+
+# NOUS OBJECTIUS (SCALPING RÀPID)
+TARGET_NET_PROFIT = 0.006  # 0.6% Net (Sortida Ràpida)
+STOP_LOSS_PCT = 0.006      # 0.6% Stop (Ratio 1:1)
+
+# Comissions estimades (Spread/Swap)
+COMMISSION_RATE = 0.001 
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_fortress_data.json"
+DATA_FILE = "bot_sniper_data.json"
 
 # ---------------------------------------------------------
-# 2. FUNCIONS DADES
+# 2. PERSISTÈNCIA
 # ---------------------------------------------------------
-def load_data():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, 'r') as f:
-                return json.load(f)
-        except: pass
-    return {
-        'balance': INITIAL_CAPITAL,
-        'equity': INITIAL_CAPITAL,
-        'wins': 0,
-        'losses': 0,
-        'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0} for t in TICKERS},
-        'history': [],
-        'last_update': "Mai"
+def save_state():
+    data = {
+        'balance': st.session_state.balance,
+        'equity': st.session_state.equity,
+        'wins': st.session_state.wins,
+        'losses': st.session_state.losses,
+        'portfolio': st.session_state.portfolio,
+        'history': st.session_state.history,
+        'last_update': datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     }
-
-def save_data(data):
     try:
         with open(DATA_FILE, 'w') as f:
             json.dump(data, f)
     except: pass
 
+def load_state():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, 'r') as f:
+                return json.load(f)
+        except: return None
+    return None
+
+saved_data = load_state()
+if saved_data:
+    if 'balance' not in st.session_state:
+        st.session_state.balance = saved_data.get('balance', INITIAL_CAPITAL)
+        st.session_state.equity = saved_data.get('equity', INITIAL_CAPITAL)
+        st.session_state.wins = saved_data.get('wins', 0)
+        st.session_state.losses = saved_data.get('losses', 0)
+        st.session_state.portfolio = saved_data.get('portfolio', {})
+        st.session_state.history = saved_data.get('history', [])
+        st.toast("🎯 Bot Sniper carregat.")
+else:
+    if 'balance' not in st.session_state:
+        st.session_state.balance = INITIAL_CAPITAL 
+        st.session_state.equity = INITIAL_CAPITAL  
+        st.session_state.wins = 0
+        st.session_state.losses = 0
+        st.session_state.history = []
+    if 'portfolio' not in st.session_state:
+        st.session_state.portfolio = {
+            t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0, 'shares': 0.0, 'stop': 0.0, 'target': 0.0} 
+            for t in TICKERS
+        }
+
+if len(st.session_state.history) > 50:
+    st.session_state.history = st.session_state.history[-50:]
+
+# ---------------------------------------------------------
+# 3. MOTOR D'ANÀLISI (NOVA ESTRATÈGIA)
+# ---------------------------------------------------------
 def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🏰 [BOT FORTRESS]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🎯 [SNIPER 0.6%]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
-def get_market_data(tickers):
+def get_data_sniper(tickers):
     try:
-        # Baixem dades (mínim 200 espelmes)
+        # Necessitem més històric (10d) per calcular bé l'EMA 200
         data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -75,176 +113,172 @@ def get_market_data(tickers):
                     df = data.copy()
             except: continue
 
-            if df.empty or len(df) < 200: continue
+            if df.empty or len(df) < 200: continue # Necessitem 200 espelmes mínim
             df = df.dropna()
-            
+
             # --- INDICADORS DE SEGURETAT ---
             
             # 1. EMA 200 (Filtre de Tendència Major)
             df['EMA_200'] = ta.ema(df['Close'], length=200)
             
-            # 2. RSI (Per detectar sobrevenda)
-            df['RSI'] = ta.rsi(df['Close'], length=14)
-            
+            # 2. ADX (Força de tendència - volem > 25)
+            try:
+                adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+                df['ADX'] = adx[adx.columns[0]] if adx is not None else 0
+            except: df['ADX'] = 0
+
+            # 3. STOCH RSI (Per comprar al "Dip")
+            # Això ens diu si està sobrevenut a curt termini
+            stoch = ta.stochrsi(df['Close'], length=14, rsi_length=14, k=3, d=3)
+            if stoch is not None:
+                df['STOCH_K'] = stoch[stoch.columns[0]] # Línia ràpida
+                df['STOCH_D'] = stoch[stoch.columns[1]] # Línia lenta
+            else:
+                df['STOCH_K'] = 50
+                df['STOCH_D'] = 50
+
             df = df.dropna()
-            
             if not df.empty:
                 processed[ticker] = df.tail(2)
         return processed
     except: return {}
 
 # ---------------------------------------------------------
-# 3. CERVELL (BACKGROUND)
+# 4. BUCLE PRINCIPAL
 # ---------------------------------------------------------
-def run_trading_logic():
-    print("🏰 CERVELL FORTRESS ARRENCAT (Buy The Dip)...")
-    
-    while True:
-        try:
-            data = load_data()
-            portfolio = data['portfolio']
-            balance = data['balance']
-            equity = data['equity']
-            
-            market_data = get_market_data(TICKERS)
-            changes = False
-            temp_equity = balance
-            
-            for ticker in TICKERS:
-                item = portfolio[ticker]
-                current_price = 0.0
-                
-                if market_data and ticker in market_data:
-                    current_price = float(market_data[ticker].iloc[-1]['Close'])
-                
-                if current_price == 0 and item['status'] == 'INVESTED':
-                    current_price = item['entry_price']
-                
-                # --- GESTIÓ POSICIONS ---
-                if item['status'] == 'INVESTED' and current_price > 0:
-                    gross_val = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
-                    lev_invested = item['invested'] * LEVERAGE
-                    net_pnl = (gross_val - lev_invested) - (lev_invested * COMMISSION_RATE)
-                    net_pnl_pct = net_pnl / item['invested']
-                    
-                    temp_equity += (item['invested'] + net_pnl)
-                    
-                    # Sortida (Mantenim els objectius)
-                    if net_pnl_pct >= TARGET_NET_PROFIT:
-                        balance += (item['invested'] + net_pnl)
-                        data['wins'] += 1
-                        data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
-                        item['status'] = 'CASH'
-                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)")
-                        changes = True
-                    
-                    elif net_pnl_pct <= -STOP_LOSS_PCT:
-                        balance += (item['invested'] + net_pnl)
-                        data['losses'] += 1
-                        data['history'].append({'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$"})
-                        item['status'] = 'CASH'
-                        send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
-                        changes = True
-                        
-                # --- ENTRADA (LÒGICA FORTALESA - BUY THE DIP) ---
-                elif item['status'] == 'CASH' and market_data and ticker in market_data:
-                    df = market_data[ticker]
-                    curr = df.iloc[-1]
-                    price = float(curr['Close'])
-                    
-                    trade_size = equity * ALLOCATION_PCT
-                    
-                    if balance >= trade_size:
-                        
-                        # 1. SEGURETAT SUPREMA: Preu > EMA 200
-                        # Només comprem accions que a llarg termini pugen.
-                        trend_ok = price > curr['EMA_200']
-                        
-                        # 2. OPORTUNITAT D'OR: RSI < 35 (Sobrevenut)
-                        # Comprem quan tothom ven per pànic. Aquí és on hi ha el rebot segur.
-                        oversold = curr['RSI'] < 35
-                        
-                        # 3. CONFIRMACIÓ: Espelma Verda
-                        # Assegurem que l'espelma actual està pujant (Close > Open)
-                        # per no "agafar un ganivet que cau".
-                        green_candle = curr['Close'] > curr['Open']
-                        
-                        # TOT S'HA DE COMPLIR
-                        if trend_ok and oversold and green_candle:
-                            item['status'] = 'INVESTED'
-                            item['entry_price'] = price
-                            item['invested'] = trade_size
-                            balance -= trade_size
-                            send_telegram(f"🏰 ENTRADA FORTALESA: {ticker}\nPreu > EMA200 (Tendència OK)\nRSI: {curr['RSI']:.1f} (Zona Rebot)\nInv: {trade_size:.2f}$")
-                            changes = True
+st.title("🎯 Bot Sniper: Objectiu 0.6% Segur")
+st.caption("Estratègia: 'Pullback' (Comprar caigudes en tendència alcista). Filtre EMA 200 + StochRSI.")
 
-            data['balance'] = balance
-            data['equity'] = temp_equity
-            data['portfolio'] = portfolio
-            data['last_update'] = datetime.now().strftime("%H:%M:%S")
-            
-            if changes:
-                save_data(data)
-            
-            if datetime.now().second < 5: 
-                save_data(data)
-
-        except Exception as e:
-            print(f"Error background: {e}")
-        
-        time.sleep(60)
-
-@st.cache_resource
-def start_background_bot():
-    if not os.path.exists(DATA_FILE):
-        save_data(load_data()) 
-    thread = threading.Thread(target=run_trading_logic, daemon=True)
-    thread.start()
-    return thread
-
-# ---------------------------------------------------------
-# 4. WEB
-# ---------------------------------------------------------
-start_background_bot()
-
-st.title("🏰 Bot Fortress 24/7 (Alta Seguretat)")
-st.caption("Estratègia: 'Buy The Dip'. Comprar caigudes (RSI<35) en tendències fortes (EMA200).")
+current_equity = st.session_state.balance
+positions_count = 0
 
 placeholder = st.empty()
 
 while True:
-    data = load_data()
-    
     with placeholder.container():
-        st.write(f"🔄 Últim escaneig: **{data.get('last_update')}**")
+        market_data = get_data_sniper(TICKERS)
+        changes_made = False
         
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Equity", f"{data.get('equity', 0):.2f}$")
-        m2.metric("Cash", f"{data.get('balance', 0):.2f}$")
-        m3.metric("Wins", data.get('wins', 0))
-        m4.metric("Losses", data.get('losses', 0))
+        temp_equity = st.session_state.balance
         
         cols = st.columns(5)
-        portfolio = data.get('portfolio', {})
         
         for i, ticker in enumerate(TICKERS):
-            if ticker not in portfolio: continue
-            item = portfolio[ticker]
+            item = st.session_state.portfolio[ticker]
+            current_price = 0.0
+            net_pnl = 0.0
+            net_pnl_pct = 0.0
+
+            if market_data and ticker in market_data:
+                df = market_data[ticker]
+                if len(df) >= 1:
+                    current_price = float(df.iloc[-1]['Close'])
             
-            col_idx = i % 5
+            if current_price == 0.0 and item['status'] == 'INVESTED':
+                current_price = item['entry_price']
+
+            # --- GESTIÓ POSICIONS ---
+            if item['status'] == 'INVESTED' and current_price > 0:
+                positions_count += 1
+                
+                # Càlcul P&L
+                gross_value = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
+                lev_invested = item['invested'] * LEVERAGE
+                gross_pnl = gross_value - lev_invested
+                commission_cost = lev_invested * COMMISSION_RATE
+                
+                net_pnl = gross_pnl - commission_cost
+                net_pnl_pct = (net_pnl / item['invested']) 
+                
+                temp_equity += (item['invested'] + net_pnl)
+
+                # SORTIDA: Més ràpida (0.6%)
+                if net_pnl_pct >= TARGET_NET_PROFIT:
+                    st.session_state.balance += (item['invested'] + net_pnl)
+                    st.session_state.wins += 1
+                    st.session_state.history.append({
+                        'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$ ({net_pnl_pct*100:.2f}%)"
+                    })
+                    item['status'] = 'CASH'
+                    send_telegram(f"✅ WIN: {ticker}\nBenefici: +{net_pnl:.2f}$ (+0.6%)")
+                    changes_made = True
+                
+                elif net_pnl_pct <= -STOP_LOSS_PCT:
+                    remaining = item['invested'] + net_pnl
+                    st.session_state.balance += remaining
+                    st.session_state.losses += 1
+                    st.session_state.history.append({
+                        'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$ ({net_pnl_pct*100:.2f}%)"
+                    })
+                    item['status'] = 'CASH'
+                    send_telegram(f"❌ LOSS: {ticker}\nPèrdua: {net_pnl:.2f}$")
+                    changes_made = True
+
+            # --- ENTRADA: ESTRATÈGIA MÉS SEGURA ---
+            elif item['status'] == 'CASH' and market_data and ticker in market_data:
+                df = market_data[ticker]
+                if len(df) >= 2:
+                    curr = df.iloc[-1]
+                    prev = df.iloc[-2]
+                    current_price = float(curr['Close'])
+                    
+                    trade_size = st.session_state.equity * ALLOCATION_PCT
+                    
+                    if st.session_state.balance >= trade_size:
+                        
+                        # 1. SEGURETAT: Estem per sobre de la mitjana de 200 sessions?
+                        # Si el preu està per sota de l'EMA 200, la tendència és baixista i NO comprem.
+                        trend_safe = current_price > curr['EMA_200']
+                        
+                        # 2. FORÇA: La tendència té força real?
+                        adx_strong = curr['ADX'] > 25
+                        
+                        # 3. OPORTUNITAT (DIP): Estem comprant barat?
+                        # StochRSI per sota de 20 (sobrevenut) i creuant cap amunt (K > D)
+                        stoch_oversold = prev['STOCH_K'] < 20
+                        stoch_crossing_up = (prev['STOCH_K'] < prev['STOCH_D']) and (curr['STOCH_K'] > curr['STOCH_D'])
+                        dip_entry = stoch_oversold and stoch_crossing_up
+                        
+                        # NOMÉS SI ES COMPLEIX TOT
+                        if trend_safe and adx_strong and dip_entry:
+                            item['status'] = 'INVESTED'
+                            item['entry_price'] = current_price
+                            item['invested'] = trade_size
+                            
+                            st.session_state.balance -= trade_size
+                            send_telegram(f"🎯 SNIPER ENTRY: {ticker}\nPreu > EMA200 (Tendència OK)\nStochRSI < 20 (Preu Barat)\nInversió: {trade_size:.2f}$")
+                            changes_made = True
+            
+            # --- VISUALITZACIÓ ---
+            col_idx = i % 5 
             with cols[col_idx]:
-                status = item['status']
+                border = "green" if item['status'] == 'INVESTED' else "grey"
                 with st.container(border=True):
                     st.markdown(f"**{ticker}**")
-                    if status == 'INVESTED':
-                        st.markdown(f"🟢 {item['invested']:.0f}$")
-                        st.caption(f"Ent: {item['entry_price']:.2f}")
+                    if item['status'] == 'INVESTED':
+                        color = "green" if net_pnl > 0 else "red"
+                        st.markdown(f"<span style='color:{color}'>{net_pnl:.2f}$</span>", unsafe_allow_html=True)
                     else:
-                        st.caption("CASH (Esperant Dip...)")
+                        st.caption(f"{current_price:.2f}$")
 
-        hist = data.get('history', [])
-        if hist:
+        st.session_state.equity = temp_equity
+        
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Valor Compte", f"{st.session_state.equity:.2f} $")
+        m2.metric("Cash", f"{st.session_state.balance:.2f} $")
+        
+        open_pos = sum(1 for t in TICKERS if st.session_state.portfolio[t]['status'] == 'INVESTED')
+        m3.metric("Posicions", f"{open_pos} / 10")
+        
+        total = st.session_state.wins + st.session_state.losses
+        wr = (st.session_state.wins/total*100) if total > 0 else 0
+        m4.metric("Win Rate", f"{wr:.1f}%")
+
+        if changes_made:
+            save_state()
+
+        if st.session_state.history:
             st.write("---")
-            st.dataframe(pd.DataFrame(hist).iloc[::-1].head(10))
+            st.dataframe(pd.DataFrame(st.session_state.history).iloc[::-1].head(5))
 
-    time.sleep(10)
+    time.sleep(60)
