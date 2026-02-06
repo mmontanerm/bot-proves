@@ -10,9 +10,9 @@ import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "MEAN REVERSION" (Win Rate > 90%)
+# 1. CONFIGURACIÓ "SNAP-BACK" (Rendibilitat Assegurada)
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot 90% WinRate", layout="wide", page_icon="💸")
+st.set_page_config(page_title="Bot Profitable 1:1", layout="wide", page_icon="💰")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -21,14 +21,15 @@ TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD'
 TIMEFRAME = "1m"        
 LEVERAGE = 5            
 
-# GESTIÓ DE RISC ASIMÈTRICA (Per aconseguir alt Win Rate)
+# GESTIÓ DE CAPITAL I RISC (La clau de la rendibilitat)
 ALLOCATION_PCT = 0.10       # 10% per operació
-TARGET_NET_PROFIT = 0.0050  # 0.5% Net (Objectiu curt i fàcil)
-STOP_LOSS_PCT = 0.0250      # 2.5% Stop (Donem molt espai perquè reboti)
+# RATIO 1:1 -> Amb un 60% d'encerts, això és matemàticament guanyador
+TARGET_NET_PROFIT = 0.0075  # 0.75% Net 
+STOP_LOSS_PCT = 0.0075      # 0.75% Stop (Tallem pèrdues ràpid!)
 COMMISSION_RATE = 0.001     
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_reversion_data.json"
+DATA_FILE = "bot_snapback_data.json"
 
 # ---------------------------------------------------------
 # 2. FUNCIONS DADES
@@ -44,7 +45,7 @@ def load_data():
         'equity': INITIAL_CAPITAL,
         'wins': 0,
         'losses': 0,
-        'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0} for t in TICKERS},
+        'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0, 'pnl': 0.0, 'pnl_pct': 0.0} for t in TICKERS},
         'history': [],
         'last_update': "Mai"
     }
@@ -59,7 +60,7 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"💸 [BOT 90%]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"💰 [BOT PROFIT]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
@@ -79,21 +80,19 @@ def get_market_data(tickers):
             if df.empty or len(df) < 30: continue
             df = df.dropna()
             
-            # --- INDICADORS MEAN REVERSION ---
+            # --- INDICADORS SNAP-BACK ---
             
-            # 1. BANDES DE BOLLINGER (Extremes)
-            # length=20, std=2.5 (La majoria usa 2.0. El 2.5 és per buscar extrems reals)
-            bb = ta.bbands(df['Close'], length=20, std=2.5)
+            # 1. BANDES DE BOLLINGER (Standard 2.0)
+            # Tornem a la desviació 2.0 per tenir més senyals, però filtrarem per confirmació
+            bb = ta.bbands(df['Close'], length=20, std=2.0)
             
             if bb is not None:
-                # pandas_ta retorna columnes amb noms tipus BBL_20_2.5, BBM_20_2.5, BBU_20_2.5
-                # Les renonbrem per fer-ho fàcil
                 cols = bb.columns
-                df['BB_LOWER'] = bb[cols[0]] # Banda Baixa
-                df['BB_MID']   = bb[cols[1]] # Mitjana
-                df['BB_UPPER'] = bb[cols[2]] # Banda Alta
+                df['BB_LOWER'] = bb[cols[0]] 
+                df['BB_MID']   = bb[cols[1]] 
+                df['BB_UPPER'] = bb[cols[2]] 
             
-            # 2. RSI (Per confirmar sobrecompra/sobrevenda)
+            # 2. RSI (Momentum)
             df['RSI'] = ta.rsi(df['Close'], length=14)
             
             df = df.dropna()
@@ -107,7 +106,7 @@ def get_market_data(tickers):
 # 3. CERVELL (BACKGROUND)
 # ---------------------------------------------------------
 def run_trading_logic():
-    print("💸 CERVELL MEAN REVERSION ARRENCAT (Bollinger 2.5)...")
+    print("💰 CERVELL SNAP-BACK ARRENCAT (Confirmació tancament)...")
     
     while True:
         try:
@@ -130,71 +129,71 @@ def run_trading_logic():
                 if current_price == 0 and item['status'] == 'INVESTED':
                     current_price = item['entry_price']
                 
-                # --- A) GESTIÓ POSICIONS (SORTIDA) ---
+                # --- A) GESTIÓ POSICIONS ---
                 if item['status'] == 'INVESTED' and current_price > 0:
                     gross_val = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
                     lev_invested = item['invested'] * LEVERAGE
                     net_pnl = (gross_val - lev_invested) - (lev_invested * COMMISSION_RATE)
                     net_pnl_pct = net_pnl / item['invested']
                     
+                    item['pnl'] = net_pnl
+                    item['pnl_pct'] = net_pnl_pct
                     temp_equity += (item['invested'] + net_pnl)
                     
-                    # 1. TAKE PROFIT FIX (0.5% Net) - Assegurar guanys ràpids
-                    win_condition = net_pnl_pct >= TARGET_NET_PROFIT
-                    
-                    # 2. SORTIDA TÈCNICA (Retorn a la mitjana)
-                    # Si el preu torna a tocar la línia del mig de Bollinger, sortim (encara que sigui amb menys guany)
-                    # Això és seguretat: la goma ja s'ha destensat.
-                    # Necessitem accedir a les dades actuals
-                    technical_exit = False
-                    if market_data and ticker in market_data:
-                        curr = market_data[ticker].iloc[-1]
-                        # Si hem comprat a baix, sortim quan toqui la mitjana
-                        if 'BB_MID' in curr and current_price >= curr['BB_MID'] and net_pnl > 0:
-                            technical_exit = True
-
-                    if win_condition or technical_exit:
+                    # 1. TAKE PROFIT (0.75%)
+                    if net_pnl_pct >= TARGET_NET_PROFIT:
                         balance += (item['invested'] + net_pnl)
                         data['wins'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
+                        item['pnl'] = 0.0
                         send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)")
                         changes = True
                     
-                    # STOP LOSS (D'emergència)
+                    # 2. STOP LOSS ESTRICTE (0.75%)
+                    # Aquí està la clau. Si no funciona ràpid, fora.
                     elif net_pnl_pct <= -STOP_LOSS_PCT:
                         balance += (item['invested'] + net_pnl)
                         data['losses'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
+                        item['pnl'] = 0.0
                         send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
                         changes = True
+                    
+                    changes = True 
                         
-                # --- B) ENTRADA (ESTRATÈGIA GOMA ELÀSTICA) ---
+                # --- B) ENTRADA (ESTRATÈGIA SNAP-BACK) ---
                 elif item['status'] == 'CASH' and market_data and ticker in market_data:
                     df = market_data[ticker]
                     curr = df.iloc[-1]
+                    prev = df.iloc[-2]
                     price = float(curr['Close'])
                     
                     trade_size = equity * ALLOCATION_PCT
                     
                     if balance >= trade_size:
                         
-                        # 1. PREU FORA DE BANDES (Anomalia Estadística)
-                        # El preu tanca PER SOTA de la banda inferior de Bollinger (2.5 std)
-                        # Això passa poques vegades i indica pànic excessiu.
-                        below_band = price < curr['BB_LOWER']
+                        # ESTRATÈGIA: COMPRA EL RETORN, NO LA CAIGUDA
                         
-                        # 2. SOBREVENDA (Confirmació)
-                        # L'RSI ha d'estar baix (< 30) per confirmar que no és una caiguda lliure sense fons.
-                        rsi_oversold = curr['RSI'] < 30
+                        # 1. Condició Prèvia: L'espelma ANTERIOR estava fora de la banda (o tocant-la)
+                        # Això indica que hi havia pànic/sobrevenda.
+                        was_outside = prev['Close'] < prev['BB_LOWER']
                         
-                        if below_band and rsi_oversold:
+                        # 2. Condició Actual: L'espelma ACTUAL tanca DINS de la banda
+                        # Això és el "Snap-Back". El preu ha recuperat el nivell. Confirmació de gir.
+                        is_inside = curr['Close'] > curr['BB_LOWER']
+                        
+                        # 3. RSI Barato però amb força
+                        # Volem que l'RSI estigui baix (<40) però pujant.
+                        rsi_ok = (curr['RSI'] < 45) and (curr['RSI'] > prev['RSI'])
+                        
+                        if was_outside and is_inside and rsi_ok:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = price
                             item['invested'] = trade_size
                             balance -= trade_size
-                            send_telegram(f"💸 ENTRADA 90%: {ticker}\nPreu fora Bandes Bollinger (2.5)\nRSI: {curr['RSI']:.1f}\nInv: {trade_size:.2f}$")
+                            send_telegram(f"💰 ENTRADA SNAP-BACK: {ticker}\nEl preu ha recuperat la Banda Bollinger.\nRSI: {curr['RSI']:.1f}\nInv: {trade_size:.2f}$")
                             changes = True
 
             data['balance'] = balance
@@ -226,8 +225,8 @@ def start_background_bot():
 # ---------------------------------------------------------
 start_background_bot()
 
-st.title("💸 Bot Mean Reversion (WinRate > 90%)")
-st.caption("Estratègia: Bollinger Bands (2.5 Std) + RSI < 30. Compra pànics, ven rebots.")
+st.title("💰 Bot Rendible (Ràtio 1:1)")
+st.caption("Estratègia: Bollinger Snap-Back. Stop Loss ajustat per garantir beneficis globals.")
 
 placeholder = st.empty()
 
@@ -235,11 +234,11 @@ while True:
     data = load_data()
     
     with placeholder.container():
-        st.write(f"🔄 Últim escaneig: **{data.get('last_update')}**")
+        st.write(f"🔄 Última actualització: **{data.get('last_update')}**")
         
         m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Equity", f"{data.get('equity', 0):.2f}$")
-        m2.metric("Cash", f"{data.get('balance', 0):.2f}$")
+        m1.metric("Equity Total", f"{data.get('equity', 0):.2f}$")
+        m2.metric("Cash Disponible", f"{data.get('balance', 0):.2f}$")
         m3.metric("Wins", data.get('wins', 0))
         m4.metric("Losses", data.get('losses', 0))
         
@@ -256,7 +255,11 @@ while True:
                 with st.container(border=True):
                     st.markdown(f"**{ticker}**")
                     if status == 'INVESTED':
-                        st.markdown(f"🟢 INV: {item['invested']:.0f}$")
+                        pnl = item.get('pnl', 0.0)
+                        pnl_pct = item.get('pnl_pct', 0.0) * 100
+                        color = "green" if pnl >= 0 else "red"
+                        st.markdown(f"Inv: {item['invested']:.0f}$")
+                        st.markdown(f"**P&L: <span style='color:{color}'>{pnl:.2f}$ ({pnl_pct:.2f}%)</span>**", unsafe_allow_html=True)
                         st.caption(f"Ent: {item['entry_price']:.2f}")
                     else:
                         st.caption("CASH")
