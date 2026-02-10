@@ -10,9 +10,9 @@ import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "TREND HUNTER" (High Win Rate)
+# 1. CONFIGURACIÓ "WALL STREET PRO" (Realistic Fees)
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Trend Hunter", layout="wide", page_icon="🦅")
+st.set_page_config(page_title="Wall Street Pro", layout="wide", page_icon="🏛️")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -21,21 +21,23 @@ TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD'
 TIMEFRAME = "1m"        
 LEVERAGE = 5            
 
-# GESTIÓ DE RISC ASIMÈTRICA (Clau per al 90% Win Rate)
-ALLOCATION_PCT = 0.10       # 10% per operació
+# GESTIÓ DE CAPITAL
+ALLOCATION_PCT = 0.15       # 15% per operació (Convicció alta)
 
-# OBJECTIUS:
-# Busquem un moviment curt (1%) però donem molt espai a l'error (3%)
-# Això augmenta dràsticament la probabilitat de tocar el verd abans que el vermell.
-TARGET_NET_PROFIT = 0.010   # 1.0% Guany (Ràpid)
-STOP_LOSS_PCT = 0.030       # 3.0% Stop (Molt ampli per aguantar volatilitat)
-COMMISSION_RATE = 0.001     
+# PARÀMETRES AJUSTATS A COMISSIONS x5
+# Cost estimat d'obertura (Spread x5) ~= 0.75% del capital.
+# Per tant, l'Stop Loss ha de ser molt més ampli per no saltar només obrir.
+TARGET_NET_PROFIT = 0.015   # 1.5% Net (Objectiu real)
+STOP_LOSS_PCT = 0.030       # 3.0% Stop (Marge suficient per aguantar el spread inicial)
+
+# Comissió realista (0.15% sobre el volum total = Spread típic)
+COMMISSION_RATE = 0.0015     
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_trend_data.json"
+DATA_FILE = "bot_pro_data.json"
 
 # ---------------------------------------------------------
-# 2. FUNCIONS DE DADES
+# 2. FUNCIONS DADES
 # ---------------------------------------------------------
 def load_data():
     if os.path.exists(DATA_FILE):
@@ -63,13 +65,12 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🦅 [BOT TREND]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🏛️ [WS PRO]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
 def get_market_data(tickers):
     try:
-        # Necessitem històric per l'EMA 200
         data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -84,22 +85,21 @@ def get_market_data(tickers):
             if df.empty or len(df) < 200: continue
             df = df.dropna()
             
-            # --- INDICADORS ---
+            # --- INDICADORS DE PRECISIÓ ---
             
-            # 1. EMA 200 (Tendència Major - Innegociable)
+            # 1. DOBLE TENDÈNCIA (Filtre de Seguretat)
+            df['EMA_50'] = ta.ema(df['Close'], length=50)
             df['EMA_200'] = ta.ema(df['Close'], length=200)
             
-            # 2. RSI (Per buscar el "dip")
+            # 2. BANDES DE BOLLINGER (Per comprar el rebot)
+            bb = ta.bbands(df['Close'], length=20, std=2.0)
+            if bb is not None:
+                df['BB_LOWER'] = bb[bb.columns[0]]
+            
+            # 3. RSI (Confirmació de fons)
             df['RSI'] = ta.rsi(df['Close'], length=14)
             
-            # 3. ADX (Per assegurar que hi ha força i no és un mercat mort)
-            try:
-                adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
-                df['ADX'] = adx[adx.columns[0]] if adx is not None else 0
-            except: df['ADX'] = 0
-
             df = df.dropna()
-            
             if not df.empty:
                 processed[ticker] = df.tail(2)
         return processed
@@ -109,7 +109,7 @@ def get_market_data(tickers):
 # 3. CERVELL (BACKGROUND)
 # ---------------------------------------------------------
 def run_trading_logic():
-    print("🦅 CERVELL TREND HUNTER ARRENCAT (EMA200 + Dip)...")
+    print("🏛️ CERVELL PRO ARRENCAT (Gestió Comissions Avançada)...")
     
     while True:
         try:
@@ -132,73 +132,74 @@ def run_trading_logic():
                 if current_price == 0 and item['status'] == 'INVESTED':
                     current_price = item['entry_price']
                 
-                # --- GESTIÓ POSICIONS ---
+                # --- GESTIÓ POSICIONS (AMB COMISSIONS REALS) ---
                 if item['status'] == 'INVESTED' and current_price > 0:
+                    # 1. Valor Brut (Palanquejat)
                     gross_val = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
                     lev_invested = item['invested'] * LEVERAGE
-                    net_pnl = (gross_val - lev_invested) - (lev_invested * COMMISSION_RATE)
+                    
+                    # 2. Cost Comissió (Spread Entrada + Spread Sortida estimat)
+                    # Apliquem la comissió sobre el volum total palanquejat
+                    commission_cost = lev_invested * COMMISSION_RATE
+                    
+                    # 3. Benefici NET
+                    # (Valor Actual - Valor Invertit) - Comissions
+                    net_pnl = (gross_val - lev_invested) - commission_cost
                     net_pnl_pct = net_pnl / item['invested']
                     
                     item['pnl'] = net_pnl
                     item['pnl_pct'] = net_pnl_pct
                     temp_equity += (item['invested'] + net_pnl)
                     
-                    # 1. TAKE PROFIT (1%)
+                    # SORTIDA: TAKE PROFIT (1.5% Net)
                     if net_pnl_pct >= TARGET_NET_PROFIT:
                         balance += (item['invested'] + net_pnl)
                         data['wins'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
-                        item['pnl'] = 0.0
-                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)")
+                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)\nBenefici net després de comissions.")
                         changes = True
                     
-                    # 2. STOP LOSS (3% - Molt més ampli)
+                    # SORTIDA: STOP LOSS (3.0% Net)
                     elif net_pnl_pct <= -STOP_LOSS_PCT:
                         balance += (item['invested'] + net_pnl)
                         data['losses'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
-                        item['pnl'] = 0.0
                         send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
                         changes = True
                     
                     changes = True 
                         
-                # --- ENTRADA (ESTRATÈGIA TREND HUNTER) ---
+                # --- ENTRADA (ESTRATÈGIA WALL STREET) ---
                 elif item['status'] == 'CASH' and market_data and ticker in market_data:
                     df = market_data[ticker]
                     curr = df.iloc[-1]
-                    prev = df.iloc[-2]
                     price = float(curr['Close'])
                     
                     trade_size = equity * ALLOCATION_PCT
                     
                     if balance >= trade_size:
                         
-                        # 1. TENDÈNCIA MAJOR: Preu > EMA 200
-                        # Això evita els 74 errors anteriors. Si el mercat cau, NO comprem.
-                        # Només comprem si la tendència de fons és alcista.
-                        trend_ok = price > curr['EMA_200']
+                        # 1. TENDÈNCIA FORTA (Sobre EMA 50 i 200)
+                        trend_strong = (price > curr['EMA_200']) and (price > curr['EMA_50'])
                         
-                        # 2. FORÇA: ADX > 20
-                        # Evitem mercats morts laterals on es perden diners per comissions.
-                        adx_ok = curr['ADX'] > 20
+                        # 2. OPORTUNITAT (Tocant Banda Inferior)
+                        bb_dip = price <= curr['BB_LOWER']
                         
-                        # 3. EL "DIP" (DESCANS): RSI < 45
-                        # No esperem al pànic extrem (<30), però sí un descans clar.
-                        rsi_dip = curr['RSI'] < 45
+                        # 3. RSI DESCANSAT (< 45)
+                        rsi_cool = curr['RSI'] < 45
                         
-                        # 4. GIR: RSI Pujant
-                        # Confirmem que el descans s'ha acabat.
-                        rsi_turn = curr['RSI'] > prev['RSI']
-                        
-                        if trend_ok and adx_ok and rsi_dip and rsi_turn:
+                        if trend_strong and bb_dip and rsi_cool:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = price
                             item['invested'] = trade_size
                             balance -= trade_size
-                            send_telegram(f"🦅 ENTRADA TREND: {ticker}\nPreu > EMA200 (Tendència OK)\nRSI: {curr['RSI']:.1f} (Rebotant)\nInv: {trade_size:.2f}$")
+                            
+                            # Càlcul estimat de comissió inicial per informar
+                            est_comm = (trade_size * LEVERAGE) * COMMISSION_RATE
+                            
+                            send_telegram(f"🏛️ ENTRADA PRO: {ticker}\nTendència Forta + Bollinger Dip\nInv: {trade_size:.2f}$\nCost Spread Estimat: -{est_comm:.2f}$")
                             changes = True
 
             data['balance'] = balance
@@ -230,8 +231,8 @@ def start_background_bot():
 # ---------------------------------------------------------
 start_background_bot()
 
-st.title("🦅 Bot Trend Hunter (High Win Rate)")
-st.caption("Estratègia: Seguir Tendència (EMA 200) + Stop Loss Ampli (3%).")
+st.title("🏛️ Bot Wall Street Pro (Fees Included)")
+st.caption("Estratègia: Doble EMA + Bollinger. Stop Loss 3% per absorbir el spread x5.")
 
 placeholder = st.empty()
 
@@ -262,7 +263,10 @@ while True:
                     if status == 'INVESTED':
                         pnl = item.get('pnl', 0.0)
                         pnl_pct = item.get('pnl_pct', 0.0) * 100
-                        color = "green" if pnl >= 0 else "red"
+                        
+                        # Color: Verd només si cobrim comissions
+                        color = "green" if pnl > 0 else "red"
+                        
                         st.markdown(f"Inv: {item['invested']:.0f}$")
                         st.markdown(f"**P&L: <span style='color:{color}'>{pnl:.2f}$ ({pnl_pct:.2f}%)</span>**", unsafe_allow_html=True)
                         st.caption(f"Ent: {item['entry_price']:.2f}")
