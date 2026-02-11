@@ -10,31 +10,29 @@ import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "WALL STREET PRO" (Realistic Fees)
+# 1. CONFIGURACIÓ "INSTITUTIONAL 5M"
 # ---------------------------------------------------------
-st.set_page_config(page_title="Wall Street Pro", layout="wide", page_icon="🏛️")
+st.set_page_config(page_title="Bot SuperTrend 5M", layout="wide", page_icon="💎")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
-TIMEFRAME = "1m"        
+
+# CANVI CRUCIAL: 5 MINUTS (Elimina el soroll del gràfic d'1 minut)
+TIMEFRAME = "5m"        
 LEVERAGE = 5            
 
 # GESTIÓ DE CAPITAL
-ALLOCATION_PCT = 0.15       # 15% per operació (Convicció alta)
+ALLOCATION_PCT = 0.15       # 15% per operació (Apostes sòlides)
 
-# PARÀMETRES AJUSTATS A COMISSIONS x5
-# Cost estimat d'obertura (Spread x5) ~= 0.75% del capital.
-# Per tant, l'Stop Loss ha de ser molt més ampli per no saltar només obrir.
-TARGET_NET_PROFIT = 0.015   # 1.5% Net (Objectiu real)
-STOP_LOSS_PCT = 0.030       # 3.0% Stop (Marge suficient per aguantar el spread inicial)
-
-# Comissió realista (0.15% sobre el volum total = Spread típic)
-COMMISSION_RATE = 0.0015     
+# OBJECTIUS EN 5 MINUTS (Moviments més amples i fiables)
+TARGET_NET_PROFIT = 0.015   # 1.5% Net
+STOP_LOSS_PCT = 0.025       # 2.5% Stop (Espai per respirar)
+COMMISSION_RATE = 0.001     
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_pro_data.json"
+DATA_FILE = "bot_supertrend_data.json"
 
 # ---------------------------------------------------------
 # 2. FUNCIONS DADES
@@ -65,13 +63,14 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🏛️ [WS PRO]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"💎 [BOT 5M]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
 def get_market_data(tickers):
     try:
-        data = yf.download(tickers, period="5d", interval="1m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
+        # Baixem dades de 5 minuts (últims 5 dies)
+        data = yf.download(tickers, period="5d", interval="5m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
             try:
@@ -82,21 +81,26 @@ def get_market_data(tickers):
                     df = data.copy()
             except: continue
 
-            if df.empty or len(df) < 200: continue
+            if df.empty or len(df) < 100: continue
             df = df.dropna()
             
-            # --- INDICADORS DE PRECISIÓ ---
+            # --- INDICADORS PROFESSIONAL (5M) ---
             
-            # 1. DOBLE TENDÈNCIA (Filtre de Seguretat)
-            df['EMA_50'] = ta.ema(df['Close'], length=50)
+            # 1. EMA 200 (Tendència de fons)
             df['EMA_200'] = ta.ema(df['Close'], length=200)
             
-            # 2. BANDES DE BOLLINGER (Per comprar el rebot)
-            bb = ta.bbands(df['Close'], length=20, std=2.0)
-            if bb is not None:
-                df['BB_LOWER'] = bb[bb.columns[0]]
+            # 2. SUPERTREND (L'indicador estrella)
+            # length=10, multiplier=3 (Configuració estàndard robusta)
+            st_data = ta.supertrend(df['High'], df['Low'], df['Close'], length=10, multiplier=3)
             
-            # 3. RSI (Confirmació de fons)
+            if st_data is not None:
+                # pandas_ta retorna: SUPERT_7_3.0 (Trend), SUPERTd_7_3.0 (Direction 1/-1), etc.
+                # Agafem la columna de direcció (1 = Verd/Buy, -1 = Vermell/Sell)
+                df['ST_DIR'] = st_data[st_data.columns[1]] 
+            else:
+                df['ST_DIR'] = 0
+
+            # 3. RSI (Per evitar comprar sostres)
             df['RSI'] = ta.rsi(df['Close'], length=14)
             
             df = df.dropna()
@@ -109,7 +113,7 @@ def get_market_data(tickers):
 # 3. CERVELL (BACKGROUND)
 # ---------------------------------------------------------
 def run_trading_logic():
-    print("🏛️ CERVELL PRO ARRENCAT (Gestió Comissions Avançada)...")
+    print("💎 CERVELL 5M ARRENCAT (SuperTrend + EMA200)...")
     
     while True:
         try:
@@ -132,35 +136,27 @@ def run_trading_logic():
                 if current_price == 0 and item['status'] == 'INVESTED':
                     current_price = item['entry_price']
                 
-                # --- GESTIÓ POSICIONS (AMB COMISSIONS REALS) ---
+                # --- A) GESTIÓ POSICIONS ---
                 if item['status'] == 'INVESTED' and current_price > 0:
-                    # 1. Valor Brut (Palanquejat)
                     gross_val = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
                     lev_invested = item['invested'] * LEVERAGE
-                    
-                    # 2. Cost Comissió (Spread Entrada + Spread Sortida estimat)
-                    # Apliquem la comissió sobre el volum total palanquejat
-                    commission_cost = lev_invested * COMMISSION_RATE
-                    
-                    # 3. Benefici NET
-                    # (Valor Actual - Valor Invertit) - Comissions
-                    net_pnl = (gross_val - lev_invested) - commission_cost
+                    net_pnl = (gross_val - lev_invested) - (lev_invested * COMMISSION_RATE)
                     net_pnl_pct = net_pnl / item['invested']
                     
                     item['pnl'] = net_pnl
                     item['pnl_pct'] = net_pnl_pct
                     temp_equity += (item['invested'] + net_pnl)
                     
-                    # SORTIDA: TAKE PROFIT (1.5% Net)
+                    # 1. TAKE PROFIT (1.5%)
                     if net_pnl_pct >= TARGET_NET_PROFIT:
                         balance += (item['invested'] + net_pnl)
                         data['wins'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
-                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)\nBenefici net després de comissions.")
+                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)")
                         changes = True
                     
-                    # SORTIDA: STOP LOSS (3.0% Net)
+                    # 2. STOP LOSS (2.5%)
                     elif net_pnl_pct <= -STOP_LOSS_PCT:
                         balance += (item['invested'] + net_pnl)
                         data['losses'] += 1
@@ -171,7 +167,7 @@ def run_trading_logic():
                     
                     changes = True 
                         
-                # --- ENTRADA (ESTRATÈGIA WALL STREET) ---
+                # --- B) ENTRADA (ESTRATÈGIA SUPERTREND 5M) ---
                 elif item['status'] == 'CASH' and market_data and ticker in market_data:
                     df = market_data[ticker]
                     curr = df.iloc[-1]
@@ -181,25 +177,26 @@ def run_trading_logic():
                     
                     if balance >= trade_size:
                         
-                        # 1. TENDÈNCIA FORTA (Sobre EMA 50 i 200)
-                        trend_strong = (price > curr['EMA_200']) and (price > curr['EMA_50'])
+                        # 1. TENDÈNCIA MAJOR: Preu > EMA 200
+                        # Filtre de seguretat bàsic. Només llargs en tendència alcista.
+                        trend_ok = price > curr['EMA_200']
                         
-                        # 2. OPORTUNITAT (Tocant Banda Inferior)
-                        bb_dip = price <= curr['BB_LOWER']
+                        # 2. SENYAL SUPERTREND: Verd (1)
+                        # Aquest indicador és molt fiable en 5M.
+                        # Indica que el preu ha trencat resistències i comença un tram alcista.
+                        supertrend_bullish = curr['ST_DIR'] == 1
                         
-                        # 3. RSI DESCANSAT (< 45)
-                        rsi_cool = curr['RSI'] < 45
+                        # 3. FILTRE RSI: No sobrecomprat (< 70)
+                        # Ens assegurem que no estem comprant al sostre absolut.
+                        rsi_ok = curr['RSI'] < 70
                         
-                        if trend_strong and bb_dip and rsi_cool:
+                        # 4. CONDICIÓ FINAL
+                        if trend_ok and supertrend_bullish and rsi_ok:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = price
                             item['invested'] = trade_size
                             balance -= trade_size
-                            
-                            # Càlcul estimat de comissió inicial per informar
-                            est_comm = (trade_size * LEVERAGE) * COMMISSION_RATE
-                            
-                            send_telegram(f"🏛️ ENTRADA PRO: {ticker}\nTendència Forta + Bollinger Dip\nInv: {trade_size:.2f}$\nCost Spread Estimat: -{est_comm:.2f}$")
+                            send_telegram(f"💎 ENTRADA 5M: {ticker}\nSuperTrend VERD + EMA 200 OK\nInversió: {trade_size:.2f}$")
                             changes = True
 
             data['balance'] = balance
@@ -216,6 +213,7 @@ def run_trading_logic():
         except Exception as e:
             print(f"Error background: {e}")
         
+        # En 5M no cal comprovar cada segon, però ho farem cada minut per actualitzar preus
         time.sleep(60)
 
 @st.cache_resource
@@ -231,8 +229,8 @@ def start_background_bot():
 # ---------------------------------------------------------
 start_background_bot()
 
-st.title("🏛️ Bot Wall Street Pro (Fees Included)")
-st.caption("Estratègia: Doble EMA + Bollinger. Stop Loss 3% per absorbir el spread x5.")
+st.title("💎 Bot SuperTrend 5M (Qualitat > Quantitat)")
+st.caption("Estratègia: Gràfics de 5 minuts. SuperTrend + EMA 200. Adéu al soroll.")
 
 placeholder = st.empty()
 
@@ -263,15 +261,13 @@ while True:
                     if status == 'INVESTED':
                         pnl = item.get('pnl', 0.0)
                         pnl_pct = item.get('pnl_pct', 0.0) * 100
-                        
-                        # Color: Verd només si cobrim comissions
                         color = "green" if pnl > 0 else "red"
                         
                         st.markdown(f"Inv: {item['invested']:.0f}$")
                         st.markdown(f"**P&L: <span style='color:{color}'>{pnl:.2f}$ ({pnl_pct:.2f}%)</span>**", unsafe_allow_html=True)
                         st.caption(f"Ent: {item['entry_price']:.2f}")
                     else:
-                        st.caption("CASH")
+                        st.caption("CASH (5M)")
 
         hist = data.get('history', [])
         if hist:
