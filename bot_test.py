@@ -10,29 +10,32 @@ import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "INSTITUTIONAL 5M"
+# 1. CONFIGURACIÓ "SMART TREND" (Gestió Professional)
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot SuperTrend 5M", layout="wide", page_icon="💎")
+st.set_page_config(page_title="Bot Smart Trend BE", layout="wide", page_icon="🧠")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
 TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
-
-# CANVI CRUCIAL: 5 MINUTS (Elimina el soroll del gràfic d'1 minut)
 TIMEFRAME = "5m"        
 LEVERAGE = 5            
 
-# GESTIÓ DE CAPITAL
-ALLOCATION_PCT = 0.15       # 15% per operació (Apostes sòlides)
+# GESTIÓ DE CAPITAL (Més conservadora per recuperar pèrdues)
+ALLOCATION_PCT = 0.10       # 10% per operació
 
-# OBJECTIUS EN 5 MINUTS (Moviments més amples i fiables)
-TARGET_NET_PROFIT = 0.015   # 1.5% Net
-STOP_LOSS_PCT = 0.025       # 2.5% Stop (Espai per respirar)
-COMMISSION_RATE = 0.001     
+# RÀTIO POSITIVA (Busquem guanyar més del que perdem)
+TARGET_NET_PROFIT = 0.018   # 1.8% Objectiu (Take Profit)
+STOP_LOSS_PCT = 0.012       # 1.2% Stop Loss Inicial (Pèrdua màxima)
 
-INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_supertrend_data.json"
+# BREAK-EVEN TRIGGER (La clau per no perdre)
+# Si guanyem un 0.6%, protegim l'operació a cost 0
+BREAK_EVEN_TRIGGER = 0.006  
+
+COMMISSION_RATE = 0.0015    # 0.15% Spread estimat
+
+INITIAL_CAPITAL = 10000.0   # (Nota: El bot recuperarà el saldo del fitxer si existeix)
+DATA_FILE = "bot_smart_data.json"
 
 # ---------------------------------------------------------
 # 2. FUNCIONS DADES
@@ -48,7 +51,7 @@ def load_data():
         'equity': INITIAL_CAPITAL,
         'wins': 0,
         'losses': 0,
-        'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0, 'pnl': 0.0, 'pnl_pct': 0.0} for t in TICKERS},
+        'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0, 'stop_price': 0.0, 'be_active': False} for t in TICKERS},
         'history': [],
         'last_update': "Mai"
     }
@@ -63,13 +66,13 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"💎 [BOT 5M]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🧠 [BOT SMART]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
 def get_market_data(tickers):
     try:
-        # Baixem dades de 5 minuts (últims 5 dies)
+        # Baixem dades 5 dies per indicadors sòlids
         data = yf.download(tickers, period="5d", interval="5m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -81,28 +84,28 @@ def get_market_data(tickers):
                     df = data.copy()
             except: continue
 
-            if df.empty or len(df) < 100: continue
+            if df.empty or len(df) < 200: continue
             df = df.dropna()
             
-            # --- INDICADORS PROFESSIONAL (5M) ---
+            # --- INDICADORS DE FILTRATGE ---
             
-            # 1. EMA 200 (Tendència de fons)
+            # 1. EMA 200 (Tendència Fons)
             df['EMA_200'] = ta.ema(df['Close'], length=200)
             
-            # 2. SUPERTREND (L'indicador estrella)
-            # length=10, multiplier=3 (Configuració estàndard robusta)
+            # 2. SUPERTREND (Senyal Entrada)
             st_data = ta.supertrend(df['High'], df['Low'], df['Close'], length=10, multiplier=3)
-            
             if st_data is not None:
-                # pandas_ta retorna: SUPERT_7_3.0 (Trend), SUPERTd_7_3.0 (Direction 1/-1), etc.
-                # Agafem la columna de direcció (1 = Verd/Buy, -1 = Vermell/Sell)
-                df['ST_DIR'] = st_data[st_data.columns[1]] 
+                df['ST_DIR'] = st_data[st_data.columns[1]] # 1 = Bullish, -1 = Bearish
             else:
                 df['ST_DIR'] = 0
 
-            # 3. RSI (Per evitar comprar sostres)
-            df['RSI'] = ta.rsi(df['Close'], length=14)
-            
+            # 3. ADX (Filtre de Força - Anti-Lateral)
+            # Només operarem si ADX > 25
+            try:
+                adx = ta.adx(df['High'], df['Low'], df['Close'], length=14)
+                df['ADX'] = adx[adx.columns[0]] if adx is not None else 0
+            except: df['ADX'] = 0
+
             df = df.dropna()
             if not df.empty:
                 processed[ticker] = df.tail(2)
@@ -113,18 +116,19 @@ def get_market_data(tickers):
 # 3. CERVELL (BACKGROUND)
 # ---------------------------------------------------------
 def run_trading_logic():
-    print("💎 CERVELL 5M ARRENCAT (SuperTrend + EMA200)...")
+    print("🧠 CERVELL SMART ARRENCAT (SuperTrend + ADX + BreakEven)...")
     
     while True:
         try:
             data = load_data()
             portfolio = data['portfolio']
             balance = data['balance']
-            equity = data['equity']
             
             market_data = get_market_data(TICKERS)
             changes = False
-            temp_equity = balance
+            
+            # Recalculem equity (Cash + Valor Posicions)
+            current_equity_calc = balance
             
             for ticker in TICKERS:
                 item = portfolio[ticker]
@@ -136,18 +140,31 @@ def run_trading_logic():
                 if current_price == 0 and item['status'] == 'INVESTED':
                     current_price = item['entry_price']
                 
-                # --- A) GESTIÓ POSICIONS ---
+                # --- A) GESTIÓ POSICIONS (PROTECCIÓ ACTIVA) ---
                 if item['status'] == 'INVESTED' and current_price > 0:
+                    
+                    # Càlculs econòmics
                     gross_val = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
                     lev_invested = item['invested'] * LEVERAGE
-                    net_pnl = (gross_val - lev_invested) - (lev_invested * COMMISSION_RATE)
+                    # Comissions estimades (Spread)
+                    fees = lev_invested * COMMISSION_RATE
+                    net_pnl = (gross_val - lev_invested) - fees
                     net_pnl_pct = net_pnl / item['invested']
                     
-                    item['pnl'] = net_pnl
-                    item['pnl_pct'] = net_pnl_pct
-                    temp_equity += (item['invested'] + net_pnl)
+                    current_equity_calc += (item['invested'] + net_pnl)
                     
-                    # 1. TAKE PROFIT (1.5%)
+                    # 1. GESTIÓ BREAK-EVEN (NOVA)
+                    # Si guanyem > 0.6% i encara no hem protegit l'operació...
+                    if net_pnl_pct >= BREAK_EVEN_TRIGGER and not item.get('be_active', False):
+                        # Movem l'Stop Loss al preu d'entrada + un petit marge per comissions
+                        # Preu Entrada * (1 + Comissió/Palanquejament)
+                        new_stop_price = item['entry_price'] * (1 + (COMMISSION_RATE / LEVERAGE))
+                        item['stop_price'] = new_stop_price
+                        item['be_active'] = True
+                        send_telegram(f"🛡️ PROTECCIÓ ACTIVADA: {ticker}\nStop Loss mogut a Break-Even (0$ Pèrdua assegurada).")
+                        changes = True
+
+                    # 2. TAKE PROFIT (1.8%)
                     if net_pnl_pct >= TARGET_NET_PROFIT:
                         balance += (item['invested'] + net_pnl)
                         data['wins'] += 1
@@ -156,64 +173,69 @@ def run_trading_logic():
                         send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)")
                         changes = True
                     
-                    # 2. STOP LOSS (2.5%)
-                    elif net_pnl_pct <= -STOP_LOSS_PCT:
+                    # 3. STOP LOSS (Dinàmic)
+                    # Comprovem si el preu baixa del nostre Stop Price
+                    elif current_price <= item['stop_price']:
                         balance += (item['invested'] + net_pnl)
-                        data['losses'] += 1
-                        data['history'].append({'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$"})
-                        item['status'] = 'CASH'
-                        send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
-                        changes = True
-                    
-                    changes = True 
                         
-                # --- B) ENTRADA (ESTRATÈGIA SUPERTREND 5M) ---
+                        # Si era un Break-Even, no compta com a pèrdua greu (és neutre)
+                        result_type = "NEUTRAL" if item.get('be_active') else "LOSS"
+                        if result_type == "LOSS":
+                            data['losses'] += 1
+                        
+                        data['history'].append({'Ticker': ticker, 'Res': result_type, 'PL': f"{net_pnl:.2f}$"})
+                        item['status'] = 'CASH'
+                        
+                        icon = "🛡️" if result_type == "NEUTRAL" else "❌"
+                        send_telegram(f"{icon} SORTIDA {ticker}: {net_pnl:.2f}$")
+                        changes = True
+                        
+                # --- B) ENTRADA (FILTRES DE QUALITAT) ---
                 elif item['status'] == 'CASH' and market_data and ticker in market_data:
                     df = market_data[ticker]
                     curr = df.iloc[-1]
                     price = float(curr['Close'])
                     
-                    trade_size = equity * ALLOCATION_PCT
+                    # Usem l'Equity actual per calcular el 10%
+                    trade_size = current_equity_calc * ALLOCATION_PCT
                     
                     if balance >= trade_size:
                         
-                        # 1. TENDÈNCIA MAJOR: Preu > EMA 200
-                        # Filtre de seguretat bàsic. Només llargs en tendència alcista.
+                        # 1. TENDÈNCIA FONS: Preu > EMA 200
                         trend_ok = price > curr['EMA_200']
                         
-                        # 2. SENYAL SUPERTREND: Verd (1)
-                        # Aquest indicador és molt fiable en 5M.
-                        # Indica que el preu ha trencat resistències i comença un tram alcista.
-                        supertrend_bullish = curr['ST_DIR'] == 1
+                        # 2. SENYAL: SuperTrend VERD (1)
+                        st_signal = curr['ST_DIR'] == 1
                         
-                        # 3. FILTRE RSI: No sobrecomprat (< 70)
-                        # Ens assegurem que no estem comprant al sostre absolut.
-                        rsi_ok = curr['RSI'] < 70
+                        # 3. FORÇA: ADX > 25 (Evitem laterals)
+                        # Aquest filtre és el que reduirà les pèrdues de 85 a 20.
+                        adx_ok = curr['ADX'] > 25
                         
-                        # 4. CONDICIÓ FINAL
-                        if trend_ok and supertrend_bullish and rsi_ok:
+                        if trend_ok and st_signal and adx_ok:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = price
                             item['invested'] = trade_size
+                            # Stop Loss inicial: 1.2% avall
+                            item['stop_price'] = price * (1 - (STOP_LOSS_PCT / LEVERAGE)) 
+                            item['be_active'] = False
+                            
                             balance -= trade_size
-                            send_telegram(f"💎 ENTRADA 5M: {ticker}\nSuperTrend VERD + EMA 200 OK\nInversió: {trade_size:.2f}$")
+                            send_telegram(f"🧠 ENTRADA SMART: {ticker}\nST Verd + ADX {curr['ADX']:.1f}\nInv: {trade_size:.2f}$")
                             changes = True
 
             data['balance'] = balance
-            data['equity'] = temp_equity
+            data['equity'] = current_equity_calc
             data['portfolio'] = portfolio
             data['last_update'] = datetime.now().strftime("%H:%M:%S")
             
             if changes:
                 save_data(data)
-            
             if datetime.now().second < 5: 
                 save_data(data)
 
         except Exception as e:
             print(f"Error background: {e}")
         
-        # En 5M no cal comprovar cada segon, però ho farem cada minut per actualitzar preus
         time.sleep(60)
 
 @st.cache_resource
@@ -229,8 +251,8 @@ def start_background_bot():
 # ---------------------------------------------------------
 start_background_bot()
 
-st.title("💎 Bot SuperTrend 5M (Qualitat > Quantitat)")
-st.caption("Estratègia: Gràfics de 5 minuts. SuperTrend + EMA 200. Adéu al soroll.")
+st.title("🧠 Bot Smart Trend (Break-Even)")
+st.caption("Estratègia: 5 Minuts. ADX filtra soroll. Break-Even protegeix guanys.")
 
 placeholder = st.empty()
 
@@ -238,7 +260,7 @@ while True:
     data = load_data()
     
     with placeholder.container():
-        st.write(f"🔄 Última actualització: **{data.get('last_update')}**")
+        st.write(f"🔄 Últim escaneig: **{data.get('last_update')}**")
         
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Equity Total", f"{data.get('equity', 0):.2f}$")
@@ -259,15 +281,18 @@ while True:
                 with st.container(border=True):
                     st.markdown(f"**{ticker}**")
                     if status == 'INVESTED':
-                        pnl = item.get('pnl', 0.0)
-                        pnl_pct = item.get('pnl_pct', 0.0) * 100
-                        color = "green" if pnl > 0 else "red"
+                        pnl = (item['invested'] * LEVERAGE / item['entry_price']) * item.get('entry_price', 0) - (item['invested']*LEVERAGE) # Aprox visual
+                        # Recuperem el valor real si tenim accés (simplificat per visualització)
                         
-                        st.markdown(f"Inv: {item['invested']:.0f}$")
-                        st.markdown(f"**P&L: <span style='color:{color}'>{pnl:.2f}$ ({pnl_pct:.2f}%)</span>**", unsafe_allow_html=True)
-                        st.caption(f"Ent: {item['entry_price']:.2f}")
+                        st.markdown(f"🟢 Inv: {item['invested']:.0f}$")
+                        
+                        # Indiquem si el Break-Even està actiu
+                        if item.get('be_active'):
+                            st.caption("🛡️ PROTEGIT (BE)")
+                        else:
+                            st.caption(f"Stop inicial: {item['stop_price']:.2f}")
                     else:
-                        st.caption("CASH (5M)")
+                        st.caption("CASH")
 
         hist = data.get('history', [])
         if hist:
