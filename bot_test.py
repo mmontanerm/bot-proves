@@ -10,34 +10,34 @@ import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "QUANT REVERSION" (Win Rate > 80%)
+# 1. CONFIGURACIÓ "QUANT PRO" (Maximització de Guanys)
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Quant RSI-2", layout="wide", page_icon="🤖")
+st.set_page_config(page_title="Bot Quant PRO", layout="wide", page_icon="🚀")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-# Ticker List (Valors líquids)
 TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
-
 TIMEFRAME = "5m"        
 LEVERAGE = 5            
 
-# GESTIÓ DE CAPITAL CONSERVADORA (Per recuperar el 20% perdut)
-ALLOCATION_PCT = 0.05       # Baixem al 5% per operació. Volem sumar moltes victòries petites.
+# GESTIÓ DE CAPITAL
+ALLOCATION_PCT = 0.10       # Pugem al 10% (Ja tenim un WinRate del 70%, podem arriscar una mica més)
 
-# PARAMETRES ESTRATÈGIA QUANT (RSI-2)
-RSI_ENTRY_THRESHOLD = 10    # Comprar quan RSI(2) < 10 (Molt sobrevenut)
-RSI_EXIT_THRESHOLD = 70     # Vendre quan RSI(2) > 70 (Rebot complert)
+# NOUS PARÀMETRES DE SORTIDA (The Squeeze)
+RSI_ENTRY_THRESHOLD = 10    # Entrem a l'infern (sobrevenda extrema)
+RSI_EXIT_THRESHOLD = 79     # Sortim al cel (sobrecompra extrema) - Abans era 70
 
-# STOP LOSS D'EMERGÈNCIA
-# En aquesta estratègia, normalment sortim per indicador (RSI > 70).
-# L'Stop Loss és només per si el mercat s'enfonsa (Crash).
-STOP_LOSS_PCT = 0.03        # 3% Stop Loss (x5 = 15% del marge invertit)
+# FILTRE DE BENEFICI MÍNIM (Nou)
+# No tancarem per RSI si no guanyem almenys un 0.40% NET
+MIN_PROFIT_TO_CLOSE = 0.0040 
+
+# STOP LOSS AJUSTAT
+STOP_LOSS_PCT = 0.020       # 2.0% (Reduït de 3% per tallar pèrdues abans)
 COMMISSION_RATE = 0.0015    
 
-INITIAL_CAPITAL = 10000.0   # Si el fitxer existeix, farà servir el saldo real actual
-DATA_FILE = "bot_quant_data.json"
+INITIAL_CAPITAL = 10000.0
+DATA_FILE = "bot_quant_pro_data.json"
 
 # ---------------------------------------------------------
 # 2. FUNCIONS DADES
@@ -53,7 +53,7 @@ def load_data():
         'equity': INITIAL_CAPITAL,
         'wins': 0,
         'losses': 0,
-        'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0, 'highest_price': 0.0} for t in TICKERS},
+        'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0, 'pnl': 0.0, 'pnl_pct': 0.0} for t in TICKERS},
         'history': [],
         'last_update': "Mai"
     }
@@ -68,13 +68,13 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🤖 [BOT QUANT]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🚀 [BOT PRO]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
 def get_market_data(tickers):
     try:
-        # Necessitem 200 espelmes per la mitjana mòbil de fons
+        # 5 dies de dades
         data = yf.download(tickers, period="5d", interval="5m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -89,14 +89,11 @@ def get_market_data(tickers):
             if df.empty or len(df) < 200: continue
             df = df.dropna()
             
-            # --- INDICADORS "QUANT SNIPER" ---
-            
-            # 1. SMA 200 (Simple Moving Average)
-            # Filtre de règim de mercat. Només operem si estem per sobre.
+            # --- INDICADORS ---
+            # 1. SMA 200 (Filtre de règim)
             df['SMA_200'] = ta.sma(df['Close'], length=200)
             
-            # 2. RSI DE 2 PERIODES (L'arma secreta)
-            # Mesura la sobrecompra/sobrevenda immediata.
+            # 2. RSI-2 (L'arma del 70% WinRate)
             df['RSI_2'] = ta.rsi(df['Close'], length=2)
             
             df = df.dropna()
@@ -109,7 +106,7 @@ def get_market_data(tickers):
 # 3. CERVELL (BACKGROUND)
 # ---------------------------------------------------------
 def run_trading_logic():
-    print("🤖 CERVELL QUANT ARRENCAT (RSI-2 Mean Reversion)...")
+    print("🚀 CERVELL QUANT PRO ARRENCAT (Optimització de Guanys)...")
     
     while True:
         try:
@@ -120,13 +117,13 @@ def run_trading_logic():
             market_data = get_market_data(TICKERS)
             changes = False
             
-            # Càlcul Equity
+            # Recalculem equity
             temp_equity = balance
             
             for ticker in TICKERS:
                 item = portfolio[ticker]
                 current_price = 0.0
-                curr_rsi2 = 50.0 # Valor neutre per defecte
+                curr_rsi2 = 50.0 
                 
                 if market_data and ticker in market_data:
                     row = market_data[ticker].iloc[-1]
@@ -136,32 +133,40 @@ def run_trading_logic():
                 if current_price == 0 and item['status'] == 'INVESTED':
                     current_price = item['entry_price']
                 
-                # --- A) GESTIÓ POSICIONS (SORTIDA DINÀMICA) ---
+                # --- A) GESTIÓ POSICIONS (MAXIMITZAR GUANYS) ---
                 if item['status'] == 'INVESTED' and current_price > 0:
                     
                     gross_val = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
                     lev_invested = item['invested'] * LEVERAGE
-                    # Comissions
+                    # Comissions Spread x5
                     fees = lev_invested * COMMISSION_RATE
+                    
                     net_pnl = (gross_val - lev_invested) - fees
                     net_pnl_pct = net_pnl / item['invested']
                     
+                    # Actualitzem dades visuals
+                    item['pnl'] = net_pnl
+                    item['pnl_pct'] = net_pnl_pct
+                    
                     temp_equity += (item['invested'] + net_pnl)
                     
-                    # 1. SORTIDA PER INDICADOR (Take Profit Tècnic)
-                    # Si l'RSI(2) puja per sobre de 70, el "rebot" s'ha acabat. Venem.
-                    # Assegurem que tenim un mínim de benefici per cobrir comissions (pnl > 0)
-                    technical_exit = (curr_rsi2 > RSI_EXIT_THRESHOLD) and (net_pnl > 0)
+                    # 1. SORTIDA INTEL·LIGENT
+                    # Condició A: L'indicador està extremadament alt (RSI > 79)
+                    rsi_exit = curr_rsi2 > RSI_EXIT_THRESHOLD
                     
-                    if technical_exit:
+                    # Condició B: Ja guanyem diners decents (> 0.40% Net)
+                    profit_ok = net_pnl_pct > MIN_PROFIT_TO_CLOSE
+                    
+                    # Només venem si l'indicador ho diu I tenim benefici real
+                    if rsi_exit and profit_ok:
                         balance += (item['invested'] + net_pnl)
                         data['wins'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
-                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$)\nSortida per RSI(2) > {RSI_EXIT_THRESHOLD}")
+                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$ | {net_pnl_pct*100:.2f}%)\nRSI(2) extrem ({curr_rsi2:.0f})")
                         changes = True
                     
-                    # 2. STOP LOSS D'EMERGÈNCIA (3%)
+                    # 2. STOP LOSS AJUSTAT (2.0%)
                     elif net_pnl_pct <= -STOP_LOSS_PCT:
                         balance += (item['invested'] + net_pnl)
                         data['losses'] += 1
@@ -169,27 +174,22 @@ def run_trading_logic():
                         item['status'] = 'CASH'
                         send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
                         changes = True
-                    
-                    # (No hi ha Take Profit fix, deixem que l'RSI ens digui quan sortir)
                         
-                # --- B) ENTRADA (ESTRATÈGIA QUANT) ---
+                # --- B) ENTRADA (MANTENIM EL QUE FUNCIONA) ---
                 elif item['status'] == 'CASH' and market_data and ticker in market_data:
                     df = market_data[ticker]
                     curr = df.iloc[-1]
                     price = float(curr['Close'])
                     
-                    # Usem l'Equity per calcular el %
                     trade_size = temp_equity * ALLOCATION_PCT
                     
                     if balance >= trade_size:
                         
-                        # 1. FILTRE DE TENDÈNCIA: Preu > SMA 200
-                        # Importantíssim. Mai comprem caigudes si la tendència general és baixista.
+                        # 1. FILTRE TENDÈNCIA (SMA 200)
                         trend_ok = price > curr['SMA_200']
                         
-                        # 2. TRIGGER: RSI(2) < 10
-                        # Això indica una caiguda extrema i ràpida (pànic momentani).
-                        # L'estadística diu que el rebot és imminent.
+                        # 2. TRIGGER (RSI-2 < 10)
+                        # Comprem el pànic extrem.
                         oversold_extreme = curr['RSI_2'] < RSI_ENTRY_THRESHOLD
                         
                         if trend_ok and oversold_extreme:
@@ -198,7 +198,7 @@ def run_trading_logic():
                             item['invested'] = trade_size
                             
                             balance -= trade_size
-                            send_telegram(f"🤖 ENTRADA QUANT: {ticker}\nPreu > SMA200 (Tendència OK)\nRSI(2): {curr['RSI_2']:.1f} (Extremadament baix)\nInv: {trade_size:.2f}$")
+                            send_telegram(f"🚀 ENTRADA PRO: {ticker}\nPreu > SMA200\nRSI(2): {curr['RSI_2']:.1f} (Pànic)\nInv: {trade_size:.2f}$")
                             changes = True
 
             data['balance'] = balance
@@ -214,7 +214,6 @@ def run_trading_logic():
         except Exception as e:
             print(f"Error background: {e}")
         
-        # En 5 minuts, l'RSI(2) canvia ràpid. Comprovem cada 30s.
         time.sleep(30)
 
 @st.cache_resource
@@ -230,8 +229,8 @@ def start_background_bot():
 # ---------------------------------------------------------
 start_background_bot()
 
-st.title("🤖 Bot Quant RSI-2 (Recuperació)")
-st.caption("Estratègia: Larry Connors RSI-2 Mean Reversion. Alta probabilitat en correccions curtes.")
+st.title("🚀 Bot Quant PRO (Max Profit)")
+st.caption("Estratègia: RSI-2 (70% WinRate) + Filtre de Benefici Mínim.")
 
 placeholder = st.empty()
 
@@ -260,11 +259,12 @@ while True:
                 with st.container(border=True):
                     st.markdown(f"**{ticker}**")
                     if status == 'INVESTED':
-                        # Càlcul PnL visual
-                        curr_price = item.get('entry_price') # Si no tenim el real aquí, usem entrada
-                        # (La lògica real està al background, això és només UI)
+                        pnl = item.get('pnl', 0.0)
+                        pnl_pct = item.get('pnl_pct', 0.0) * 100
+                        color = "green" if pnl >= 0 else "red"
                         
-                        st.markdown(f"🟢 Inv: {item['invested']:.0f}$")
+                        st.markdown(f"Inv: {item['invested']:.0f}$")
+                        st.markdown(f"**P&L: <span style='color:{color}'>{pnl:.2f}$ ({pnl_pct:.2f}%)</span>**", unsafe_allow_html=True)
                         st.caption(f"Ent: {item['entry_price']:.2f}")
                     else:
                         st.caption("CASH")
