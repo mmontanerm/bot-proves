@@ -10,34 +10,33 @@ import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "QUANT PRO" (Maximització de Guanys)
+# 1. CONFIGURACIÓ "SNIPER SCALP" (Alta Precisió & Risc Mínim)
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Quant PRO", layout="wide", page_icon="🚀")
+st.set_page_config(page_title="Bot Sniper Scalp", layout="wide", page_icon="🎯")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 
-TICKERS = ['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
+TICKERS =['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD', 'COST']
 TIMEFRAME = "5m"        
 LEVERAGE = 5            
 
-# GESTIÓ DE CAPITAL
-ALLOCATION_PCT = 0.10       # Pugem al 10% (Ja tenim un WinRate del 70%, podem arriscar una mica més)
+ALLOCATION_PCT = 0.10       # 10% per operació
 
-# NOUS PARÀMETRES DE SORTIDA (The Squeeze)
-RSI_ENTRY_THRESHOLD = 10    # Entrem a l'infern (sobrevenda extrema)
-RSI_EXIT_THRESHOLD = 79     # Sortim al cel (sobrecompra extrema) - Abans era 70
+# ---------------------------------------------------------
+# NOUS PARÀMETRES DE RISC (LA CLAU DE LA RENDIBILITAT)
+# ---------------------------------------------------------
+TARGET_NET_PROFIT = 0.010   # 1.0% Take Profit Llarg (Si hi arriba de cop, perfecte)
+STOP_LOSS_PCT = 0.010       # 1.0% STOP LOSS QUIRÚRGIC (Tallem pèrdues a la meitat que abans!)
 
-# FILTRE DE BENEFICI MÍNIM (Nou)
-# No tancarem per RSI si no guanyem almenys un 0.40% NET
-MIN_PROFIT_TO_CLOSE = 0.0040 
+# SORTIDA TÈCNICA (Recuperem la que funcionava bé)
+RSI_ENTRY_THRESHOLD = 12    # Sobrevenut
+RSI_EXIT_THRESHOLD = 70     # Sobrecomprat (Venem immediatament, sense demanar mínims)
 
-# STOP LOSS AJUSTAT
-STOP_LOSS_PCT = 0.020       # 2.0% (Reduït de 3% per tallar pèrdues abans)
-COMMISSION_RATE = 0.0015    
+COMMISSION_RATE = 0.0015    # 0.15% Comissió/Spread
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_quant_pro_data.json"
+DATA_FILE = "bot_sniper_scalp_data.json"
 
 # ---------------------------------------------------------
 # 2. FUNCIONS DADES
@@ -54,7 +53,7 @@ def load_data():
         'wins': 0,
         'losses': 0,
         'portfolio': {t: {'status': 'CASH', 'entry_price': 0.0, 'invested': 0.0, 'pnl': 0.0, 'pnl_pct': 0.0} for t in TICKERS},
-        'history': [],
+        'history':[],
         'last_update': "Mai"
     }
 
@@ -68,13 +67,12 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🚀 [BOT PRO]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🎯 [SNIPER SCALP]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
 def get_market_data(tickers):
     try:
-        # 5 dies de dades
         data = yf.download(tickers, period="5d", interval="5m", group_by='ticker', progress=False, auto_adjust=True, threads=False)
         processed = {}
         for ticker in tickers:
@@ -89,11 +87,10 @@ def get_market_data(tickers):
             if df.empty or len(df) < 200: continue
             df = df.dropna()
             
-            # --- INDICADORS ---
-            # 1. SMA 200 (Filtre de règim)
+            # 1. SMA 200 (Tendència)
             df['SMA_200'] = ta.sma(df['Close'], length=200)
             
-            # 2. RSI-2 (L'arma del 70% WinRate)
+            # 2. RSI(2) (Reversió a curt termini)
             df['RSI_2'] = ta.rsi(df['Close'], length=2)
             
             df = df.dropna()
@@ -106,7 +103,7 @@ def get_market_data(tickers):
 # 3. CERVELL (BACKGROUND)
 # ---------------------------------------------------------
 def run_trading_logic():
-    print("🚀 CERVELL QUANT PRO ARRENCAT (Optimització de Guanys)...")
+    print("🎯 CERVELL SNIPER SCALP ARRENCAT (Stop 1%, Sortida RSI Ràpida)...")
     
     while True:
         try:
@@ -116,8 +113,6 @@ def run_trading_logic():
             
             market_data = get_market_data(TICKERS)
             changes = False
-            
-            # Recalculem equity
             temp_equity = balance
             
             for ticker in TICKERS:
@@ -133,72 +128,80 @@ def run_trading_logic():
                 if current_price == 0 and item['status'] == 'INVESTED':
                     current_price = item['entry_price']
                 
-                # --- A) GESTIÓ POSICIONS (MAXIMITZAR GUANYS) ---
+                # --- A) GESTIÓ POSICIONS (PROTECCIÓ TOTAL) ---
                 if item['status'] == 'INVESTED' and current_price > 0:
                     
                     gross_val = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
                     lev_invested = item['invested'] * LEVERAGE
-                    # Comissions Spread x5
                     fees = lev_invested * COMMISSION_RATE
-                    
                     net_pnl = (gross_val - lev_invested) - fees
                     net_pnl_pct = net_pnl / item['invested']
                     
-                    # Actualitzem dades visuals
                     item['pnl'] = net_pnl
                     item['pnl_pct'] = net_pnl_pct
-                    
                     temp_equity += (item['invested'] + net_pnl)
                     
-                    # 1. SORTIDA INTEL·LIGENT
-                    # Condició A: L'indicador està extremadament alt (RSI > 79)
-                    rsi_exit = curr_rsi2 > RSI_EXIT_THRESHOLD
-                    
-                    # Condició B: Ja guanyem diners decents (> 0.40% Net)
-                    profit_ok = net_pnl_pct > MIN_PROFIT_TO_CLOSE
-                    
-                    # Només venem si l'indicador ho diu I tenim benefici real
-                    if rsi_exit and profit_ok:
+                    # 1. SORTIDA TÈCNICA PER INDICADOR (LA CLAU DE L'ÈXIT D'ABANS)
+                    # Si l'indicador toca el sostre (>70), sortim amb el que tinguem (sempre que sigui profit)
+                    # Eliminem la regla absurda de "exigir un % mínim".
+                    if (curr_rsi2 > RSI_EXIT_THRESHOLD) and (net_pnl > 0):
                         balance += (item['invested'] + net_pnl)
                         data['wins'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
-                        send_telegram(f"✅ WIN: {ticker} (+{net_pnl:.2f}$ | {net_pnl_pct*100:.2f}%)\nRSI(2) extrem ({curr_rsi2:.0f})")
+                        send_telegram(f"✅ WIN (RSI Rebot): {ticker} (+{net_pnl:.2f}$)")
+                        changes = True
+
+                    # 2. TAKE PROFIT DIRECTE (1.0%)
+                    # Si hi ha una pujada violenta i de cop guanyem un 1%, assegurem i tanquem.
+                    elif net_pnl_pct >= TARGET_NET_PROFIT:
+                        balance += (item['invested'] + net_pnl)
+                        data['wins'] += 1
+                        data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
+                        item['status'] = 'CASH'
+                        send_telegram(f"🎯 WIN (Take Profit): {ticker} (+{net_pnl:.2f}$)")
                         changes = True
                     
-                    # 2. STOP LOSS AJUSTAT (2.0%)
+                    # 3. STOP LOSS QUIRÚRGIC (1.0%)
+                    # Hem passat del 2.5/2.0% a només l'1.0%. Tallem l'hemorràgia de soca-rel.
                     elif net_pnl_pct <= -STOP_LOSS_PCT:
                         balance += (item['invested'] + net_pnl)
                         data['losses'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
-                        send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
+                        send_telegram(f"❌ LOSS (Stop Tallat): {ticker} ({net_pnl:.2f}$)")
                         changes = True
                         
-                # --- B) ENTRADA (MANTENIM EL QUE FUNCIONA) ---
+                # --- B) ENTRADA (AMB CONFIRMACIÓ) ---
                 elif item['status'] == 'CASH' and market_data and ticker in market_data:
                     df = market_data[ticker]
                     curr = df.iloc[-1]
+                    prev = df.iloc[-2]
                     price = float(curr['Close'])
                     
                     trade_size = temp_equity * ALLOCATION_PCT
                     
                     if balance >= trade_size:
                         
-                        # 1. FILTRE TENDÈNCIA (SMA 200)
+                        # 1. TENDÈNCIA
                         trend_ok = price > curr['SMA_200']
                         
-                        # 2. TRIGGER (RSI-2 < 10)
-                        # Comprem el pànic extrem.
-                        oversold_extreme = curr['RSI_2'] < RSI_ENTRY_THRESHOLD
+                        # 2. PÀNIC (RSI-2 BAIX)
+                        # Demanem que l'espelma *anterior* o l'*actual* estiguin al límit (<12)
+                        rsi_extreme = (curr['RSI_2'] < RSI_ENTRY_THRESHOLD) or (prev['RSI_2'] < RSI_ENTRY_THRESHOLD)
                         
-                        if trend_ok and oversold_extreme:
+                        # 3. CONFIRMACIÓ VISUAL (ESPELMA VERDA) -> *NOVA ASSEGURANÇA*
+                        # L'espelma actual ha de ser verda (Tancament > Obertura).
+                        # Això significa que, malgrat estar molt abaix, els compradors ja estan guanyant aquesta batalla de 5 minuts.
+                        green_candle = curr['Close'] > curr['Open']
+                        
+                        if trend_ok and rsi_extreme and green_candle:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = price
                             item['invested'] = trade_size
                             
                             balance -= trade_size
-                            send_telegram(f"🚀 ENTRADA PRO: {ticker}\nPreu > SMA200\nRSI(2): {curr['RSI_2']:.1f} (Pànic)\nInv: {trade_size:.2f}$")
+                            send_telegram(f"🎯 ENTRADA SCALP: {ticker}\nPreu > SMA200\nRSI(2) Sobrevenut + ESPELMA VERDA\nInv: {trade_size:.2f}$")
                             changes = True
 
             data['balance'] = balance
@@ -229,8 +232,8 @@ def start_background_bot():
 # ---------------------------------------------------------
 start_background_bot()
 
-st.title("🚀 Bot Quant PRO (Max Profit)")
-st.caption("Estratègia: RSI-2 (70% WinRate) + Filtre de Benefici Mínim.")
+st.title("🎯 Bot Sniper Scalp (Alta Eficiència)")
+st.caption("Estratègia: RSI-2 amb Sortida Ràpida i Stop Loss ultra curt (1%).")
 
 placeholder = st.empty()
 
@@ -269,7 +272,7 @@ while True:
                     else:
                         st.caption("CASH")
 
-        hist = data.get('history', [])
+        hist = data.get('history',[])
         if hist:
             st.write("---")
             st.dataframe(pd.DataFrame(hist).iloc[::-1].head(10))
