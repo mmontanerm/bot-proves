@@ -10,9 +10,9 @@ import threading
 from datetime import datetime
 
 # ---------------------------------------------------------
-# 1. CONFIGURACIÓ "SNIPER SCALP" (Alta Precisió & Risc Mínim)
+# 1. CONFIGURACIÓ "TREND SNIPER" (Marge de Respiració)
 # ---------------------------------------------------------
-st.set_page_config(page_title="Bot Sniper Scalp", layout="wide", page_icon="🎯")
+st.set_page_config(page_title="Bot Trend Sniper", layout="wide", page_icon="🎯")
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
@@ -21,22 +21,17 @@ TICKERS =['NVDA', 'TSLA', 'AMZN', 'META', 'LLY', 'JPM', 'USO', 'GLD', 'BTC-USD',
 TIMEFRAME = "5m"        
 LEVERAGE = 5            
 
-ALLOCATION_PCT = 0.10       # 10% per operació
+ALLOCATION_PCT = 0.15       # 15% per operació (Menys operacions, més segures)
 
 # ---------------------------------------------------------
-# NOUS PARÀMETRES DE RISC (LA CLAU DE LA RENDIBILITAT)
+# MATEMÀTICA ANTI-ASFIXIA (La clau del nou Win Rate)
 # ---------------------------------------------------------
-TARGET_NET_PROFIT = 0.010   # 1.0% Take Profit Llarg (Si hi arriba de cop, perfecte)
-STOP_LOSS_PCT = 0.010       # 1.0% STOP LOSS QUIRÚRGIC (Tallem pèrdues a la meitat que abans!)
-
-# SORTIDA TÈCNICA (Recuperem la que funcionava bé)
-RSI_ENTRY_THRESHOLD = 12    # Sobrevenut
-RSI_EXIT_THRESHOLD = 70     # Sobrecomprat (Venem immediatament, sense demanar mínims)
-
-COMMISSION_RATE = 0.0015    # 0.15% Comissió/Spread
+TARGET_NET_PROFIT = 0.035   # 3.5% Net de guany (El preu real ha de pujar un 0.7%)
+STOP_LOSS_PCT = 0.050       # 5.0% Stop Loss (El preu real pot caure un 1% sense fer-nos fora)
+COMMISSION_RATE = 0.0015    # Cost estimat del Spread d'entrada i sortida
 
 INITIAL_CAPITAL = 10000.0
-DATA_FILE = "bot_sniper_scalp_data.json"
+DATA_FILE = "bot_trend_sniper_data.json"
 
 # ---------------------------------------------------------
 # 2. FUNCIONS DADES
@@ -67,7 +62,7 @@ def send_telegram(msg):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID: return
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🎯 [SNIPER SCALP]\n{msg}", "parse_mode": "Markdown"}
+        payload = {"chat_id": TELEGRAM_CHAT_ID, "text": f"🎯 [TREND SNIPER]\n{msg}", "parse_mode": "Markdown"}
         requests.post(url, json=payload)
     except: pass
 
@@ -87,12 +82,19 @@ def get_market_data(tickers):
             if df.empty or len(df) < 200: continue
             df = df.dropna()
             
-            # 1. SMA 200 (Tendència)
-            df['SMA_200'] = ta.sma(df['Close'], length=200)
+            # --- INDICADORS INFAL·LIBLES ---
+            # 1. EMA 200 (L'escut protector)
+            df['EMA_200'] = ta.ema(df['Close'], length=200)
             
-            # 2. RSI(2) (Reversió a curt termini)
-            df['RSI_2'] = ta.rsi(df['Close'], length=2)
-            
+            # 2. MACD (El gallet d'entrada)
+            macd = ta.macd(df['Close'])
+            if macd is not None:
+                df['MACD'] = macd.iloc[:, 0]        # Línia MACD (Ràpida)
+                df['MACD_SIG'] = macd.iloc[:, 2]    # Línia Senyal (Lenta)
+            else:
+                df['MACD'] = 0
+                df['MACD_SIG'] = 0
+                
             df = df.dropna()
             if not df.empty:
                 processed[ticker] = df.tail(2)
@@ -103,7 +105,7 @@ def get_market_data(tickers):
 # 3. CERVELL (BACKGROUND)
 # ---------------------------------------------------------
 def run_trading_logic():
-    print("🎯 CERVELL SNIPER SCALP ARRENCAT (Stop 1%, Sortida RSI Ràpida)...")
+    print("🎯 CERVELL TREND SNIPER ARRENCAT (MACD Cross + Anti-Asfixia)...")
     
     while True:
         try:
@@ -118,17 +120,15 @@ def run_trading_logic():
             for ticker in TICKERS:
                 item = portfolio[ticker]
                 current_price = 0.0
-                curr_rsi2 = 50.0 
                 
                 if market_data and ticker in market_data:
                     row = market_data[ticker].iloc[-1]
                     current_price = float(row['Close'])
-                    curr_rsi2 = float(row['RSI_2'])
                 
                 if current_price == 0 and item['status'] == 'INVESTED':
                     current_price = item['entry_price']
                 
-                # --- A) GESTIÓ POSICIONS (PROTECCIÓ TOTAL) ---
+                # --- A) GESTIÓ POSICIONS (AMB MARGE) ---
                 if item['status'] == 'INVESTED' and current_price > 0:
                     
                     gross_val = (item['invested'] * LEVERAGE / item['entry_price']) * current_price
@@ -141,38 +141,25 @@ def run_trading_logic():
                     item['pnl_pct'] = net_pnl_pct
                     temp_equity += (item['invested'] + net_pnl)
                     
-                    # 1. SORTIDA TÈCNICA PER INDICADOR (LA CLAU DE L'ÈXIT D'ABANS)
-                    # Si l'indicador toca el sostre (>70), sortim amb el que tinguem (sempre que sigui profit)
-                    # Eliminem la regla absurda de "exigir un % mínim".
-                    if (curr_rsi2 > RSI_EXIT_THRESHOLD) and (net_pnl > 0):
+                    # 1. TAKE PROFIT (3.5%)
+                    if net_pnl_pct >= TARGET_NET_PROFIT:
                         balance += (item['invested'] + net_pnl)
                         data['wins'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
-                        send_telegram(f"✅ WIN (RSI Rebot): {ticker} (+{net_pnl:.2f}$)")
-                        changes = True
-
-                    # 2. TAKE PROFIT DIRECTE (1.0%)
-                    # Si hi ha una pujada violenta i de cop guanyem un 1%, assegurem i tanquem.
-                    elif net_pnl_pct >= TARGET_NET_PROFIT:
-                        balance += (item['invested'] + net_pnl)
-                        data['wins'] += 1
-                        data['history'].append({'Ticker': ticker, 'Res': 'WIN', 'PL': f"+{net_pnl:.2f}$"})
-                        item['status'] = 'CASH'
-                        send_telegram(f"🎯 WIN (Take Profit): {ticker} (+{net_pnl:.2f}$)")
+                        send_telegram(f"✅ WIN 🎯: {ticker} (+{net_pnl:.2f}$ | +{net_pnl_pct*100:.2f}%)")
                         changes = True
                     
-                    # 3. STOP LOSS QUIRÚRGIC (1.0%)
-                    # Hem passat del 2.5/2.0% a només l'1.0%. Tallem l'hemorràgia de soca-rel.
+                    # 2. STOP LOSS AMPLI (5.0%)
                     elif net_pnl_pct <= -STOP_LOSS_PCT:
                         balance += (item['invested'] + net_pnl)
                         data['losses'] += 1
                         data['history'].append({'Ticker': ticker, 'Res': 'LOSS', 'PL': f"{net_pnl:.2f}$"})
                         item['status'] = 'CASH'
-                        send_telegram(f"❌ LOSS (Stop Tallat): {ticker} ({net_pnl:.2f}$)")
+                        send_telegram(f"❌ LOSS: {ticker} ({net_pnl:.2f}$)")
                         changes = True
                         
-                # --- B) ENTRADA (AMB CONFIRMACIÓ) ---
+                # --- B) ENTRADA (MACD GOLDEN CROSS) ---
                 elif item['status'] == 'CASH' and market_data and ticker in market_data:
                     df = market_data[ticker]
                     curr = df.iloc[-1]
@@ -183,25 +170,27 @@ def run_trading_logic():
                     
                     if balance >= trade_size:
                         
-                        # 1. TENDÈNCIA
-                        trend_ok = price > curr['SMA_200']
+                        # 1. TENDÈNCIA ALCISTA: Preu > EMA 200
+                        trend_ok = price > curr['EMA_200']
                         
-                        # 2. PÀNIC (RSI-2 BAIX)
-                        # Demanem que l'espelma *anterior* o l'*actual* estiguin al límit (<12)
-                        rsi_extreme = (curr['RSI_2'] < RSI_ENTRY_THRESHOLD) or (prev['RSI_2'] < RSI_ENTRY_THRESHOLD)
+                        # 2. MACD CROSSOVER (El Gir Confirmat)
+                        # Al minut anterior, la línia MACD estava per sota del Senyal.
+                        # En aquest minut, ha creuat per sobre.
+                        # Això ens indica que la força de caiguda s'ha acabat i comença la pujada.
+                        macd_crossing_up = (prev['MACD'] < prev['MACD_SIG']) and (curr['MACD'] > curr['MACD_SIG'])
                         
-                        # 3. CONFIRMACIÓ VISUAL (ESPELMA VERDA) -> *NOVA ASSEGURANÇA*
-                        # L'espelma actual ha de ser verda (Tancament > Obertura).
-                        # Això significa que, malgrat estar molt abaix, els compradors ja estan guanyant aquesta batalla de 5 minuts.
-                        green_candle = curr['Close'] > curr['Open']
+                        # 3. ZONA NEGATIVA (Comprem barato)
+                        # Volem que aquest creuament es produeixi per sota de la línia zero (o molt a prop), 
+                        # indicant que l'acció havia corregit i ara s'aixeca.
+                        macd_below_zero = curr['MACD'] < 0
                         
-                        if trend_ok and rsi_extreme and green_candle:
+                        if trend_ok and macd_crossing_up and macd_below_zero:
                             item['status'] = 'INVESTED'
                             item['entry_price'] = price
                             item['invested'] = trade_size
                             
                             balance -= trade_size
-                            send_telegram(f"🎯 ENTRADA SCALP: {ticker}\nPreu > SMA200\nRSI(2) Sobrevenut + ESPELMA VERDA\nInv: {trade_size:.2f}$")
+                            send_telegram(f"🚀 ENTRADA CONFIRMADA: {ticker}\nPreu > EMA200\nMACD Creuant a l'Alça\nInv: {trade_size:.2f}$")
                             changes = True
 
             data['balance'] = balance
@@ -217,7 +206,7 @@ def run_trading_logic():
         except Exception as e:
             print(f"Error background: {e}")
         
-        time.sleep(30)
+        time.sleep(60)
 
 @st.cache_resource
 def start_background_bot():
@@ -232,8 +221,8 @@ def start_background_bot():
 # ---------------------------------------------------------
 start_background_bot()
 
-st.title("🎯 Bot Sniper Scalp (Alta Eficiència)")
-st.caption("Estratègia: RSI-2 amb Sortida Ràpida i Stop Loss ultra curt (1%).")
+st.title("🎯 Bot Trend Sniper (Win Rate Fix)")
+st.caption("Estratègia: MACD Crossover + Stop Loss Ampli per evitar asfíxia de comissions.")
 
 placeholder = st.empty()
 
